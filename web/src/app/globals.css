@@ -1,0 +1,61 @@
+@import "tailwindcss";
+
+:root {
+  color-scheme: dark;
+}
+
+html,
+body {
+  min-height: 100%;
+  background:
+    radial-gradient(circle at top left, rgba(56, 189, 248, 0.18), transparent 26%),
+    radial-gradient(circle at top right, rgba(99, 102, 241, 0.16), transparent 24%),
+    linear-gradient(135deg, #04111e 0%, #071523 45%, #0a1b31 100%);
+  color: #f8fafc;
+}
+
+body {
+  font-family: Arial, Helvetica, sans-serif;
+}
+
+.glass {
+  background: linear-gradient(180deg,
+      rgba(15, 23, 42, 0.72) 0%,
+      rgba(15, 23, 42, 0.5) 100%);
+  backdrop-filter: blur(14px);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  box-shadow:
+    0 10px 30px rgba(2, 8, 23, 0.35),
+    inset 0 1px 0 rgba(255, 255, 255, 0.03);
+}
+
+.alert-glow {
+  box-shadow:
+    0 0 0 1px rgba(251, 191, 36, 0.18),
+    0 0 24px rgba(245, 158, 11, 0.18),
+    0 0 60px rgba(245, 158, 11, 0.08);
+}
+
+.alert-badge {
+  animation: pulse-alert 1.6s ease-in-out infinite;
+}
+
+@keyframes pulse-alert {
+  0% {
+    transform: scale(1);
+    box-shadow: 0 0 0 0 rgba(251, 191, 36, 0.32);
+    opacity: 0.92;
+  }
+
+  50% {
+    transform: scale(1.04);
+    box-shadow: 0 0 0 10px rgba(251, 191, 36, 0);
+    opacity: 1;
+  }
+
+  100% {
+    transform: scale(1);
+    box-shadow: 0 0 0 0 rgba(251, 191, 36, 0);
+    opacity: 0.92;
+  }
+}

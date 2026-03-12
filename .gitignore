@@ -1,0 +1,21 @@
+# Python
+venv/
+__pycache__/
+*.pyc
+
+# Env
+.env
+.env.*
+!.env.example
+
+# Data
+Data/*.csv
+
+# Node / Next
+web/node_modules/
+web/.next/
+web/out/
+
+# Logs / OS
+.DS_Store
+*.log

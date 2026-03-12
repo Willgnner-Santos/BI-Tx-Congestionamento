@@ -1,0 +1,11 @@
+.git
+.gitignore
+venv
+__pycache__
+*.pyc
+.env
+.env.*
+Data/*.csv
+web/node_modules
+web/.next
+web/out
