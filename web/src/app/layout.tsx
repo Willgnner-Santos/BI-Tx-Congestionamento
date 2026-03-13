@@ -2,7 +2,7 @@ import type { Metadata } from "next";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: "Tx Congestionamento | Painel",
+  title: "Taxa de Congestionamento | Painel",
   description: "Painel executivo de taxa de congestionamento",
 };
 

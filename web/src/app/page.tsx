@@ -1,9 +1,11 @@
 import { AlertTriangle, CalendarDays, MapPin, Scale } from "lucide-react";
 import { FiltersPanel } from "@/components/FiltersPanel";
 import { SeriesChart } from "@/components/SeriesChart";
-import { BacktestTable } from "@/components/BacktestTable";
+// Backtest removido do painel para simplificar a leitura executiva.
+// Se quiser reativar depois, basta reimportar o componente abaixo.
+// import { BacktestTable } from "@/components/BacktestTable";
 import {
-  getBacktestRanking,
+  // getBacktestRanking,
   getChartData,
   getFilterOptions,
   getSummary,
@@ -17,7 +19,6 @@ type SearchParams = Promise<{
   granularity?: string | string[];
   comarca?: string | string[];
   serventia?: string | string[];
-  ano?: string | string[];
   show6?: string | string[];
   show12?: string | string[];
 }>;
@@ -29,11 +30,6 @@ function getSingle(value?: string | string[]) {
 function formatPercent(value?: number | null) {
   if (value === undefined || value === null || Number.isNaN(value)) return "-";
   return `${value.toFixed(2)}%`;
-}
-
-function formatPp(value?: number | null) {
-  if (value === undefined || value === null || Number.isNaN(value)) return "-";
-  return `${value.toFixed(2)} p.p.`;
 }
 
 function formatMonthYear(value?: string | null) {
@@ -76,8 +72,6 @@ export default async function Page({
       ? rawServentia
       : filterOptions.serventias[0] || "";
 
-  const ano = getSingle(params.ano) || "Todos";
-
   const hasForecastParams =
     params.show6 !== undefined || params.show12 !== undefined;
 
@@ -96,56 +90,47 @@ export default async function Page({
     granularity,
     comarca,
     serventia,
-    ano,
+    ano: "Todos",
     show6,
     show12,
   };
 
   const threshold = Number(process.env.ALERT_THRESHOLD || 60);
-  const isBacktest = ano !== "Todos";
 
   const canLoad =
     scope === "global" || (Boolean(comarca) && Boolean(serventia));
 
-  const [summary, chartData, backtestRows] = canLoad
+  const [summary, chartData] = canLoad
     ? await Promise.all([
       getSummary(filters),
       getChartData(filters),
-      getBacktestRanking(filters),
+      // Backtest removido do painel:
+      // getBacktestRanking(filters),
     ])
-    : [null, [], []];
+    : [null, []];
 
-  const badgeText = isBacktest
-    ? scope === "global"
-      ? `Global • Backtest ${ano}`
-      : `Backtest ${ano}`
-    : scope === "global"
+  const badgeText =
+    scope === "global"
       ? `Global • Base até ${formatMonthYear(summary?.base_date)}`
       : `Base até ${formatMonthYear(summary?.base_date)}`;
 
-  const chartDescription = isBacktest
-    ? "Ano específico mostra o backtest histórico da IA para o recorte selecionado."
-    : scope === "global"
-      ? "Visão global consolidada de todas as comarcas e serventias, com foco apenas na série histórica."
+  const chartDescription =
+    scope === "global"
+      ? "Visão global consolidada de todas as comarcas e serventias, com foco na leitura histórica agregada."
       : "O ponto da previsão pulsa quando ultrapassa o limite de alerta.";
 
-  const cardLabel6 = isBacktest ? "MAE backtest 6m" : "Previsão 6 meses";
-  const cardLabel12 = isBacktest ? "MAE backtest 12m" : "Previsão 12 meses";
+  const cardLabel6 = "Previsão 6 meses";
+  const cardLabel12 = "Previsão 12 meses";
 
-  const cardValue6 = isBacktest
-    ? formatPp(summary?.metric_6)
-    : formatPercent(summary?.metric_6);
+  const cardValue6 = formatPercent(summary?.metric_6);
+  const cardValue12 = formatPercent(summary?.metric_12);
 
-  const cardValue12 = isBacktest
-    ? formatPp(summary?.metric_12)
-    : formatPercent(summary?.metric_12);
-
-  const showAlert6 = !isBacktest && (summary?.metric_6 ?? 0) > threshold;
-  const showAlert12 = !isBacktest && (summary?.metric_12 ?? 0) > threshold;
+  const showAlert6 = !isGlobalScope && (summary?.metric_6 ?? 0) > threshold;
+  const showAlert12 = !isGlobalScope && (summary?.metric_12 ?? 0) > threshold;
 
   const effectiveShow6 = !isGlobalScope && show6;
   const effectiveShow12 = !isGlobalScope && show12;
-  const effectiveShowThreshold = !isGlobalScope && !isBacktest;
+  const effectiveShowThreshold = !isGlobalScope;
 
   return (
     <main className="min-h-screen px-4 py-6 lg:px-6">
@@ -153,7 +138,7 @@ export default async function Page({
         <header className="mb-6 flex flex-col gap-4 rounded-3xl border border-white/10 bg-slate-950/40 px-5 py-5 backdrop-blur md:flex-row md:items-center md:justify-between">
           <div>
             <h1 className="text-3xl font-bold tracking-tight text-white">
-              Tx Congestionamento
+              Taxa de Congestionamento
             </h1>
             <p className="mt-1 text-sm text-slate-300">
               Painel Executivo • Real x Previsão
@@ -170,13 +155,11 @@ export default async function Page({
           <FiltersPanel
             comarcas={filterOptions.comarcas}
             serventias={filterOptions.serventias}
-            anos={filterOptions.anos}
             current={{
               scope,
               granularity,
               comarca,
               serventia,
-              ano,
               show6,
               show12,
             }}
@@ -201,10 +184,10 @@ export default async function Page({
                 </div>
 
                 <div
-                  className={`glass rounded-3xl border p-5 lg:p-6 ${isBacktest
-                      ? "border-white/10"
-                      : alertClass(summary?.metric_6 ?? null, threshold)
-                    }`}
+                  className={`glass rounded-3xl border p-5 lg:p-6 ${alertClass(
+                    summary?.metric_6 ?? null,
+                    threshold
+                  )}`}
                 >
                   <div className="mb-3 flex items-center justify-between gap-3">
                     <div className="text-xs font-bold uppercase tracking-[0.18em] text-slate-300">
@@ -218,24 +201,21 @@ export default async function Page({
                     )}
                   </div>
 
-                  <div
-                    className={`text-5xl font-bold tracking-tight ${isBacktest ? "text-cyan-300" : "text-amber-300"
-                      }`}
-                  >
+                  <div className="text-5xl font-bold tracking-tight text-amber-300">
                     {cardValue6}
                   </div>
 
                   <div className="mt-3 text-sm text-slate-300">
-                    {isBacktest ? "melhor modelo: " : "modelo: "}
+                    modelo:{" "}
                     <span className="text-white">{summary?.model_6 || "-"}</span>
                   </div>
                 </div>
 
                 <div
-                  className={`glass rounded-3xl border p-5 lg:p-6 ${isBacktest
-                      ? "border-white/10"
-                      : alertClass(summary?.metric_12 ?? null, threshold)
-                    }`}
+                  className={`glass rounded-3xl border p-5 lg:p-6 ${alertClass(
+                    summary?.metric_12 ?? null,
+                    threshold
+                  )}`}
                 >
                   <div className="mb-3 flex items-center justify-between gap-3">
                     <div className="text-xs font-bold uppercase tracking-[0.18em] text-slate-300">
@@ -249,15 +229,12 @@ export default async function Page({
                     )}
                   </div>
 
-                  <div
-                    className={`text-5xl font-bold tracking-tight ${isBacktest ? "text-cyan-300" : "text-violet-300"
-                      }`}
-                  >
+                  <div className="text-5xl font-bold tracking-tight text-violet-300">
                     {cardValue12}
                   </div>
 
                   <div className="mt-3 text-sm text-slate-300">
-                    {isBacktest ? "melhor modelo: " : "modelo: "}
+                    modelo:{" "}
                     <span className="text-white">{summary?.model_12 || "-"}</span>
                   </div>
                 </div>
@@ -275,55 +252,55 @@ export default async function Page({
               granularity={granularity}
             />
 
+            {/* Backtest removido do painel para reduzir ruído visual e evitar confusão com a coluna "Pontos". */}
+            {/* Se quiser reativar depois, basta restaurar o import e o bloco abaixo. */}
+            {/*
             <div className="grid gap-6 xl:grid-cols-[1fr_320px]">
               <BacktestTable rows={backtestRows} />
+            </div>
+            */}
 
-              <div className="glass rounded-3xl p-5 lg:p-6">
-                <div className="mb-4 flex items-center gap-2 text-white">
-                  <Scale size={18} />
-                  <h3 className="text-lg font-semibold">Leitura do painel</h3>
-                </div>
+            <div className="glass rounded-3xl p-5 lg:p-6">
+              <div className="mb-4 flex items-center gap-2 text-white">
+                <Scale size={18} />
+                <h3 className="text-lg font-semibold">Leitura do painel</h3>
+              </div>
 
-                <div className="space-y-3 text-sm leading-6 text-slate-300">
-                  {isBacktest ? (
-                    <>
-                      <p>
-                        Em ano específico, o painel entra em modo{" "}
-                        <strong>backtest</strong>. Os cards de 6m e 12m mostram{" "}
-                        <strong>erro absoluto médio</strong>, não projeção futura.
-                      </p>
-                      <p>
-                        As linhas do gráfico mostram como a IA se comportou no
-                        histórico daquele recorte.
-                      </p>
-                    </>
-                  ) : (
-                    <>
-                      <p>
-                        Em <strong>Todos</strong>, o painel mostra a previsão
-                        atual/futura a partir da base mais recente.
-                      </p>
-                      <p>
-                        O destaque visual e a bolinha pulsante aparecem quando a
-                        previsão ultrapassa <strong>{threshold}%</strong>.
-                      </p>
-                    </>
-                  )}
+              <div className="space-y-3 text-sm leading-6 text-slate-300">
+                <p>
+                  O painel apresenta a <strong>série histórica real</strong> e,
+                  no escopo de unidade, também permite visualizar as{" "}
+                  <strong>projeções de 6 e 12 meses</strong> a partir da base
+                  mais recente.
+                </p>
 
-                  {scope === "global" && (
-                    <p>
-                      Na visão global, o gráfico usa{" "}
-                      <strong>média simples das unidades</strong> e prioriza
-                      leitura executiva, com menos ruído visual do que a visão
-                      micro.
-                    </p>
-                  )}
+                <p>
+                  Os cards superiores mostram os <strong>últimos valores reais</strong>{" "}
+                  observados e os <strong>resultados previstos</strong> pelos
+                  modelos selecionados para o recorte atual.
+                </p>
 
+                <p>
+                  O destaque visual e a bolinha pulsante aparecem quando a
+                  previsão ultrapassa <strong>{threshold}%</strong>, sinalizando
+                  um ponto de atenção para acompanhamento gerencial.
+                </p>
+
+                {scope === "global" && (
                   <p>
-                    A tabela de backtest resume os modelos com menor erro no
-                    recorte selecionado.
+                    Na visão global, o gráfico consolida as informações de todas
+                    as unidades e prioriza uma leitura executiva agregada, sem
+                    exibir as projeções por unidade.
                   </p>
-                </div>
+                )}
+
+                {scope === "unit" && (
+                  <p>
+                    Utilize os filtros de comarca e serventia para refinar a
+                    análise e comparar o comportamento da série conforme o
+                    recorte desejado.
+                  </p>
+                )}
               </div>
             </div>
           </div>

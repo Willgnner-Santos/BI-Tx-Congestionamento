@@ -7,13 +7,11 @@ import { usePathname, useRouter, useSearchParams } from "next/navigation";
 type Props = {
     comarcas: string[];
     serventias: string[];
-    anos: string[];
     current: {
         scope: "unit" | "global";
         granularity: "monthly" | "annual";
         comarca: string;
         serventia: string;
-        ano: string;
         show6: boolean;
         show12: boolean;
     };
@@ -36,7 +34,6 @@ function normalizeFormState(state: FormState): FormState {
 export function FiltersPanel({
     comarcas,
     serventias,
-    anos,
     current,
 }: Props) {
     const router = useRouter();
@@ -59,7 +56,9 @@ export function FiltersPanel({
 
             params.set("scope", next.scope);
             params.set("granularity", next.granularity);
-            params.set("ano", next.ano);
+
+            // Mantém o painel sempre trabalhando com toda a base histórica.
+            params.delete("ano");
 
             if (next.scope === "unit") {
                 params.set("comarca", next.comarca);
@@ -123,12 +122,6 @@ export function FiltersPanel({
 
     function onServentiaChange(value: string) {
         const next = normalizeFormState({ ...form, serventia: value });
-        setForm(next);
-        pushQuery(next);
-    }
-
-    function onAnoChange(value: string) {
-        const next = normalizeFormState({ ...form, ano: value });
         setForm(next);
         pushQuery(next);
     }
@@ -221,42 +214,6 @@ export function FiltersPanel({
                     </>
                 )}
 
-                <div>
-                    <label className="mb-2 block text-xs font-bold uppercase tracking-[0.18em] text-slate-300">
-                        Ano
-                    </label>
-                    <select
-                        value={form.ano}
-                        onChange={(e) => onAnoChange(e.target.value)}
-                        disabled={isPending}
-                        className="w-full rounded-2xl border border-white/10 bg-slate-900/50 px-4 py-3 text-white outline-none transition focus:border-cyan-400 disabled:opacity-70"
-                    >
-                        {anos.map((item) => (
-                            <option key={item} value={item}>
-                                {item}
-                            </option>
-                        ))}
-                    </select>
-
-                    <p className="mt-2 text-xs leading-5 text-slate-400">
-                        {isGlobalScope ? (
-                            <>
-                                <strong>Todos</strong> mostra a série histórica consolidada
-                                global.
-                                <br />
-                                Ano específico filtra a visualização mensal ou anual normalmente.
-                            </>
-                        ) : (
-                            <>
-                                <strong>Todos</strong> mostra previsão atual/futura.
-                                <br />
-                                Ano específico mostra o <strong>backtest histórico</strong> da
-                                IA.
-                            </>
-                        )}
-                    </p>
-                </div>
-
                 {!isGlobalScope ? (
                     <div>
                         <span className="mb-2 block text-xs font-bold uppercase tracking-[0.18em] text-slate-300">
@@ -295,17 +252,27 @@ export function FiltersPanel({
                 )}
 
                 <div className="rounded-2xl border border-white/10 bg-slate-950/30 px-4 py-3 text-xs text-slate-300">
-                    {isPending ? (
-                        <span className="inline-flex items-center gap-2 text-cyan-300">
-                            <LoaderCircle size={14} className="animate-spin" />
-                            Atualizando painel...
-                        </span>
-                    ) : (
-                        <span>
-                            Atualização automática ativada. Ao trocar um filtro, o painel
-                            recarrega sozinho.
-                        </span>
-                    )}
+                    <div>
+                        {isPending ? (
+                            <span className="inline-flex items-center gap-2 text-cyan-300">
+                                <LoaderCircle size={14} className="animate-spin" />
+                                Atualizando painel...
+                            </span>
+                        ) : (
+                            <span>
+                                Atualização automática ativada. Ao trocar um filtro, o painel
+                                recarrega sozinho.
+                            </span>
+                        )}
+                    </div>
+
+                    <div className="mt-3 border-t border-white/10 pt-3 leading-5 text-slate-300">
+                        Solução desenvolvida pela{" "}
+                        <strong className="text-white">
+                            Diretoria de Inteligência Artificial, Ciência de Dados e
+                            Estatística – DIACDE
+                        </strong>.
+                    </div>
                 </div>
             </div>
         </aside>

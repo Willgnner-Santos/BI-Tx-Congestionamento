@@ -1,5 +1,8 @@
 import type { BacktestRow } from "@/lib/dashboard";
 
+// Componente mantido apenas para referência futura.
+// No momento ele não está mais sendo renderizado no page.tsx.
+
 type Props = {
     rows: BacktestRow[];
 };
@@ -26,7 +29,10 @@ export function BacktestTable({ rows }: Props) {
                     <tbody>
                         {rows.length > 0 ? (
                             rows.map((row) => (
-                                <tr key={row.model} className="border-b border-white/5 text-slate-100">
+                                <tr
+                                    key={row.model}
+                                    className="border-b border-white/5 text-slate-100"
+                                >
                                     <td className="px-3 py-3">{row.model}</td>
                                     <td className="px-3 py-3">{row.mae.toFixed(2)}</td>
                                     <td className="px-3 py-3">{row.pontos}</td>
@@ -34,7 +40,10 @@ export function BacktestTable({ rows }: Props) {
                             ))
                         ) : (
                             <tr>
-                                <td colSpan={3} className="px-3 py-6 text-center text-slate-400">
+                                <td
+                                    colSpan={3}
+                                    className="px-3 py-6 text-center text-slate-400"
+                                >
                                     Nenhum dado de backtest encontrado para o recorte selecionado.
                                 </td>
                             </tr>
