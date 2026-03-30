@@ -32,7 +32,7 @@ ENV CSV_DIR=$CSV_DIR
 ENV GIT_SHA=$GIT_SHA
 
 COPY --from=deps /app/node_modules ./node_modules
-COPY . .
+COPY . ./
 RUN npm run build
 
 FROM node:20-alpine AS runner
