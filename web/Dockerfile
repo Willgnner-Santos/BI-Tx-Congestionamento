@@ -1,7 +1,7 @@
 FROM node:20-alpine AS deps
 WORKDIR /app
 
-COPY web/package*.json ./
+COPY package*.json ./
 RUN npm ci
 
 FROM node:20-alpine AS builder
@@ -32,7 +32,7 @@ ENV CSV_DIR=$CSV_DIR
 ENV GIT_SHA=$GIT_SHA
 
 COPY --from=deps /app/node_modules ./node_modules
-COPY web/. ./
+COPY . .
 RUN npm run build
 
 FROM node:20-alpine AS runner
@@ -71,3 +71,77 @@ COPY --from=builder /app/.next/static ./.next/static
 
 EXPOSE 3000
 CMD ["node", "server.js"]
+
+# FROM node:20-alpine AS deps
+# WORKDIR /app
+
+# COPY web/package*.json ./
+# RUN npm ci
+
+# FROM node:20-alpine AS builder
+# WORKDIR /app
+
+# ARG DATABASE_URL
+# ARG DATABASE_SSL
+# ARG ALERT_THRESHOLD
+# ARG DB_HOST
+# ARG DB_PORT
+# ARG DB_NAME
+# ARG DB_USER
+# ARG DB_PASSWORD
+# ARG DB_SCHEMA
+# ARG CSV_DIR
+# ARG GIT_SHA
+
+# ENV DATABASE_URL=$DATABASE_URL
+# ENV DATABASE_SSL=$DATABASE_SSL
+# ENV ALERT_THRESHOLD=$ALERT_THRESHOLD
+# ENV DB_HOST=$DB_HOST
+# ENV DB_PORT=$DB_PORT
+# ENV DB_NAME=$DB_NAME
+# ENV DB_USER=$DB_USER
+# ENV DB_PASSWORD=$DB_PASSWORD
+# ENV DB_SCHEMA=$DB_SCHEMA
+# ENV CSV_DIR=$CSV_DIR
+# ENV GIT_SHA=$GIT_SHA
+
+# COPY --from=deps /app/node_modules ./node_modules
+# COPY web/. ./
+# RUN npm run build
+
+# FROM node:20-alpine AS runner
+# WORKDIR /app
+
+# ENV NODE_ENV=production
+# ENV PORT=3000
+
+# ARG DATABASE_URL
+# ARG DATABASE_SSL
+# ARG ALERT_THRESHOLD
+# ARG DB_HOST
+# ARG DB_PORT
+# ARG DB_NAME
+# ARG DB_USER
+# ARG DB_PASSWORD
+# ARG DB_SCHEMA
+# ARG CSV_DIR
+# ARG GIT_SHA
+
+# ENV DATABASE_URL=$DATABASE_URL
+# ENV DATABASE_SSL=$DATABASE_SSL
+# ENV ALERT_THRESHOLD=$ALERT_THRESHOLD
+# ENV DB_HOST=$DB_HOST
+# ENV DB_PORT=$DB_PORT
+# ENV DB_NAME=$DB_NAME
+# ENV DB_USER=$DB_USER
+# ENV DB_PASSWORD=$DB_PASSWORD
+# ENV DB_SCHEMA=$DB_SCHEMA
+# ENV CSV_DIR=$CSV_DIR
+# ENV GIT_SHA=$GIT_SHA
+
+# COPY --from=builder /app/public ./public
+# COPY --from=builder /app/.next/standalone ./
+# COPY --from=builder /app/.next/static ./.next/static
+
+# EXPOSE 3000
+# CMD ["node", "server.js"]
