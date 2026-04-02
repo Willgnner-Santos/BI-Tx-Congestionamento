@@ -1,6 +1,10 @@
+from __future__ import annotations
+
 from pathlib import Path
 from urllib.parse import quote_plus
 import os
+from typing import Iterable
+
 import pandas as pd
 from dotenv import load_dotenv
 from sqlalchemy import create_engine, text
@@ -19,20 +23,26 @@ DB_NAME = os.getenv("DB_NAME")
 DB_USER = os.getenv("DB_USER")
 DB_PASSWORD = os.getenv("DB_PASSWORD")
 DB_SCHEMA = os.getenv("DB_SCHEMA", "public")
-CSV_DIR = BASE_DIR / os.getenv("CSV_DIR", "Data")
+BI_REPORTS_DIR = os.getenv("BI_REPORTS_DIR")
 
-ARQUIVOS_TABELAS = {
+ARQUIVOS_OBRIGATORIOS = {
     "bi_backtest_predictions_long.csv": "bi_backtest_predictions_long",
     "bi_forecast_champion_long.csv": "bi_forecast_champion_long",
     "bi_summary_wide.csv": "bi_summary_wide",
     "bi_timeseries_real_long.csv": "bi_timeseries_real_long",
 }
 
+ARQUIVOS_OPCIONAIS = {
+    "bi_forecast_tribunal_long.csv": "bi_forecast_tribunal_long",
+    "bi_summary_tribunal.csv": "bi_summary_tribunal",
+    "bi_timeseries_tribunal_long.csv": "bi_timeseries_tribunal_long",
+}
+
 
 # =========================================================
 # FUNÇÕES AUXILIARES
 # =========================================================
-def validar_variaveis():
+def validar_variaveis() -> None:
     obrigatorias = {
         "DB_HOST": DB_HOST,
         "DB_PORT": DB_PORT,
@@ -45,9 +55,6 @@ def validar_variaveis():
     if faltando:
         raise ValueError(f"Variáveis ausentes no .env: {', '.join(faltando)}")
 
-    if not CSV_DIR.exists():
-        raise FileNotFoundError(f"Pasta de dados não encontrada: {CSV_DIR}")
-
 
 def criar_engine():
     senha_codificada = quote_plus(DB_PASSWORD)
@@ -55,8 +62,7 @@ def criar_engine():
         f"postgresql+psycopg2://{DB_USER}:{senha_codificada}"
         f"@{DB_HOST}:{DB_PORT}/{DB_NAME}"
     )
-    engine = create_engine(url, pool_pre_ping=True)
-    return engine
+    return create_engine(url, pool_pre_ping=True)
 
 
 def normalizar_colunas(df: pd.DataFrame) -> pd.DataFrame:
@@ -79,13 +85,12 @@ def tentar_ler_csv(caminho_csv: Path) -> pd.DataFrame:
 
     for encoding in encodings:
         try:
-            df = pd.read_csv(
+            return pd.read_csv(
                 caminho_csv,
                 sep=",",
                 encoding=encoding,
-                low_memory=False
+                low_memory=False,
             )
-            return df
         except UnicodeDecodeError:
             continue
 
@@ -94,13 +99,12 @@ def tentar_ler_csv(caminho_csv: Path) -> pd.DataFrame:
         b"",
         0,
         1,
-        f"Não foi possível ler o arquivo {caminho_csv.name} com os encodings testados."
+        f"Não foi possível ler o arquivo {caminho_csv.name} com os encodings testados.",
     )
 
 
 def tratar_tipos(df: pd.DataFrame) -> pd.DataFrame:
-    # Colunas de data mais prováveis no seu caso
-    colunas_data = ["ds", "last_date"]
+    colunas_data = ["ds", "last_date", "base_date"]
 
     for col in colunas_data:
         if col in df.columns:
@@ -109,8 +113,39 @@ def tratar_tipos(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
-def carregar_tabela(engine, arquivo_csv: str, nome_tabela: str):
-    caminho_csv = CSV_DIR / arquivo_csv
+def resolve_reports_dir() -> Path:
+    if BI_REPORTS_DIR:
+        candidato = Path(BI_REPORTS_DIR)
+        if not candidato.is_absolute():
+            candidato = BASE_DIR / candidato
+        if candidato.exists():
+            return candidato
+        raise FileNotFoundError(f"BI_REPORTS_DIR informado não existe: {candidato}")
+
+    outputs_dir = BASE_DIR / "Notebooks" / "Modelagem" / "outputs"
+    if outputs_dir.exists():
+        runs = [p for p in outputs_dir.iterdir() if p.is_dir()]
+        runs = sorted(runs, key=lambda p: p.stat().st_mtime, reverse=True)
+        for run_dir in runs:
+            reports_dir = run_dir / "reports"
+            if reports_dir.exists():
+                return reports_dir
+
+    data_dir = BASE_DIR / "Data"
+    if data_dir.exists():
+        return data_dir
+
+    raise FileNotFoundError(
+        "Não encontrei a pasta de reports do BI. Verifique Notebooks/Modelagem/outputs/<run>/reports ou BI_REPORTS_DIR."
+    )
+
+
+def arquivos_presentes(base_dir: Path, arquivos: Iterable[str]) -> list[str]:
+    return [nome for nome in arquivos if (base_dir / nome).exists()]
+
+
+def carregar_tabela(engine, origem_dir: Path, arquivo_csv: str, nome_tabela: str) -> None:
+    caminho_csv = origem_dir / arquivo_csv
 
     if not caminho_csv.exists():
         raise FileNotFoundError(f"Arquivo não encontrado: {caminho_csv}")
@@ -127,30 +162,72 @@ def carregar_tabela(engine, arquivo_csv: str, nome_tabela: str):
         name=nome_tabela,
         con=engine,
         schema=DB_SCHEMA,
-        if_exists="replace",   # substitui a tabela se já existir
+        if_exists="replace",
         index=False,
         chunksize=1000,
-        method="multi"
+        method="multi",
     )
 
     print(f"Tabela carregada com sucesso: {DB_SCHEMA}.{nome_tabela}")
 
 
+def criar_indices(engine) -> None:
+    comandos = [
+        f'CREATE INDEX IF NOT EXISTS ix_bi_real_ds ON {DB_SCHEMA}.bi_timeseries_real_long (ds)',
+        f'CREATE INDEX IF NOT EXISTS ix_bi_real_comarca_serventia ON {DB_SCHEMA}.bi_timeseries_real_long (comarca, serventia)',
+        f'CREATE INDEX IF NOT EXISTS ix_bi_fc_ds ON {DB_SCHEMA}.bi_forecast_champion_long (ds)',
+        f'CREATE INDEX IF NOT EXISTS ix_bi_fc_horizon ON {DB_SCHEMA}.bi_forecast_champion_long (horizon)',
+        f'CREATE INDEX IF NOT EXISTS ix_bi_fc_comarca_serventia ON {DB_SCHEMA}.bi_forecast_champion_long (comarca, serventia)',
+        f'CREATE INDEX IF NOT EXISTS ix_bi_bt_ds ON {DB_SCHEMA}.bi_backtest_predictions_long (ds)',
+        f'CREATE INDEX IF NOT EXISTS ix_bi_bt_horizon ON {DB_SCHEMA}.bi_backtest_predictions_long (horizon)',
+        f'CREATE INDEX IF NOT EXISTS ix_bi_bt_comarca_serventia ON {DB_SCHEMA}.bi_backtest_predictions_long (comarca, serventia)',
+        f'CREATE INDEX IF NOT EXISTS ix_bi_sw_comarca_serventia ON {DB_SCHEMA}.bi_summary_wide (comarca, serventia)',
+        f'CREATE INDEX IF NOT EXISTS ix_bi_sw_last_date ON {DB_SCHEMA}.bi_summary_wide (last_date)',
+        f'CREATE INDEX IF NOT EXISTS ix_bi_summary_tribunal_last_date ON {DB_SCHEMA}.bi_summary_tribunal (last_date)',
+        f'CREATE INDEX IF NOT EXISTS ix_bi_forecast_tribunal_ds ON {DB_SCHEMA}.bi_forecast_tribunal_long (ds)',
+        f'CREATE INDEX IF NOT EXISTS ix_bi_forecast_tribunal_horizon ON {DB_SCHEMA}.bi_forecast_tribunal_long (horizon)',
+    ]
+
+    with engine.begin() as conn:
+        for sql in comandos:
+            try:
+                conn.execute(text(sql))
+            except Exception:
+                pass
+
+
 # =========================================================
 # EXECUÇÃO PRINCIPAL
 # =========================================================
-def main():
+def main() -> None:
     validar_variaveis()
+    origem_dir = resolve_reports_dir()
     engine = criar_engine()
+
+    print(f"Origem dos CSVs do BI: {origem_dir}")
+
+    obrigatorios_faltando = [
+        nome for nome in ARQUIVOS_OBRIGATORIOS if not (origem_dir / nome).exists()
+    ]
+    if obrigatorios_faltando:
+        raise FileNotFoundError(
+            f"Arquivos obrigatórios ausentes em {origem_dir}: {', '.join(obrigatorios_faltando)}"
+        )
+
+    opcionais_presentes = arquivos_presentes(origem_dir, ARQUIVOS_OPCIONAIS.keys())
 
     try:
         with engine.begin() as conn:
             conn.execute(text("SELECT 1"))
         print("Conexão com PostgreSQL OK.")
 
-        for arquivo_csv, nome_tabela in ARQUIVOS_TABELAS.items():
-            carregar_tabela(engine, arquivo_csv, nome_tabela)
+        for arquivo_csv, nome_tabela in ARQUIVOS_OBRIGATORIOS.items():
+            carregar_tabela(engine, origem_dir, arquivo_csv, nome_tabela)
 
+        for arquivo_csv in opcionais_presentes:
+            carregar_tabela(engine, origem_dir, arquivo_csv, ARQUIVOS_OPCIONAIS[arquivo_csv])
+
+        criar_indices(engine)
         print("\nCarga finalizada com sucesso.")
 
     except Exception as e:

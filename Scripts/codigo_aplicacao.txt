@@ -1,0 +1,2415 @@
+================================================================================
+ARQUIVO: docker-compose.yml
+================================================================================
+
+services:
+  web:
+    build:
+      context: ./web
+      dockerfile: Dockerfile
+    container_name: tx-congestionamento-web
+    ports:
+      - "3000:3000"
+    env_file:
+      - ./web/.env.local
+    restart: unless-stopped
+
+
+================================================================================
+ARQUIVO: .env
+================================================================================
+
+DB_HOST=d4jgig.easypanel.host
+DB_PORT=5433
+DB_NAME=postgres
+DB_USER=postgres
+DB_PASSWORD=admin
+DB_SCHEMA=public
+
+CSV_DIR=Data
+
+================================================================================
+ARQUIVO: Scripts/Carga_banco.py
+================================================================================
+
+from pathlib import Path
+from urllib.parse import quote_plus
+import os
+import pandas as pd
+from dotenv import load_dotenv
+from sqlalchemy import create_engine, text
+
+# =========================================================
+# CONFIGURAÇÃO BASE
+# =========================================================
+BASE_DIR = Path(__file__).resolve().parents[1]
+ENV_PATH = BASE_DIR / ".env"
+
+load_dotenv(ENV_PATH)
+
+DB_HOST = os.getenv("DB_HOST")
+DB_PORT = os.getenv("DB_PORT")
+DB_NAME = os.getenv("DB_NAME")
+DB_USER = os.getenv("DB_USER")
+DB_PASSWORD = os.getenv("DB_PASSWORD")
+DB_SCHEMA = os.getenv("DB_SCHEMA", "public")
+CSV_DIR = BASE_DIR / os.getenv("CSV_DIR", "Data")
+
+ARQUIVOS_TABELAS = {
+    "bi_backtest_predictions_long.csv": "bi_backtest_predictions_long",
+    "bi_forecast_champion_long.csv": "bi_forecast_champion_long",
+    "bi_summary_wide.csv": "bi_summary_wide",
+    "bi_timeseries_real_long.csv": "bi_timeseries_real_long",
+}
+
+
+# =========================================================
+# FUNÇÕES AUXILIARES
+# =========================================================
+def validar_variaveis():
+    obrigatorias = {
+        "DB_HOST": DB_HOST,
+        "DB_PORT": DB_PORT,
+        "DB_NAME": DB_NAME,
+        "DB_USER": DB_USER,
+        "DB_PASSWORD": DB_PASSWORD,
+    }
+
+    faltando = [chave for chave, valor in obrigatorias.items() if not valor]
+    if faltando:
+        raise ValueError(f"Variáveis ausentes no .env: {', '.join(faltando)}")
+
+    if not CSV_DIR.exists():
+        raise FileNotFoundError(f"Pasta de dados não encontrada: {CSV_DIR}")
+
+
+def criar_engine():
+    senha_codificada = quote_plus(DB_PASSWORD)
+    url = (
+        f"postgresql+psycopg2://{DB_USER}:{senha_codificada}"
+        f"@{DB_HOST}:{DB_PORT}/{DB_NAME}"
+    )
+    engine = create_engine(url, pool_pre_ping=True)
+    return engine
+
+
+def normalizar_colunas(df: pd.DataFrame) -> pd.DataFrame:
+    df.columns = [
+        col.strip()
+        .lower()
+        .replace(" ", "_")
+        .replace("-", "_")
+        .replace("/", "_")
+        .replace("(", "")
+        .replace(")", "")
+        .replace(".", "")
+        for col in df.columns
+    ]
+    return df
+
+
+def tentar_ler_csv(caminho_csv: Path) -> pd.DataFrame:
+    encodings = ["utf-8", "utf-8-sig", "latin1"]
+
+    for encoding in encodings:
+        try:
+            df = pd.read_csv(
+                caminho_csv,
+                sep=",",
+                encoding=encoding,
+                low_memory=False
+            )
+            return df
+        except UnicodeDecodeError:
+            continue
+
+    raise UnicodeDecodeError(
+        "encoding",
+        b"",
+        0,
+        1,
+        f"Não foi possível ler o arquivo {caminho_csv.name} com os encodings testados."
+    )
+
+
+def tratar_tipos(df: pd.DataFrame) -> pd.DataFrame:
+    # Colunas de data mais prováveis no seu caso
+    colunas_data = ["ds", "last_date"]
+
+    for col in colunas_data:
+        if col in df.columns:
+            df[col] = pd.to_datetime(df[col], errors="coerce")
+
+    return df
+
+
+def carregar_tabela(engine, arquivo_csv: str, nome_tabela: str):
+    caminho_csv = CSV_DIR / arquivo_csv
+
+    if not caminho_csv.exists():
+        raise FileNotFoundError(f"Arquivo não encontrado: {caminho_csv}")
+
+    print(f"\nLendo arquivo: {arquivo_csv}")
+    df = tentar_ler_csv(caminho_csv)
+    df = normalizar_colunas(df)
+    df = tratar_tipos(df)
+
+    print(f"Linhas: {len(df):,} | Colunas: {len(df.columns)}")
+    print(f"Gravando tabela: {DB_SCHEMA}.{nome_tabela}")
+
+    df.to_sql(
+        name=nome_tabela,
+        con=engine,
+        schema=DB_SCHEMA,
+        if_exists="replace",   # substitui a tabela se já existir
+        index=False,
+        chunksize=1000,
+        method="multi"
+    )
+
+    print(f"Tabela carregada com sucesso: {DB_SCHEMA}.{nome_tabela}")
+
+
+# =========================================================
+# EXECUÇÃO PRINCIPAL
+# =========================================================
+def main():
+    validar_variaveis()
+    engine = criar_engine()
+
+    try:
+        with engine.begin() as conn:
+            conn.execute(text("SELECT 1"))
+        print("Conexão com PostgreSQL OK.")
+
+        for arquivo_csv, nome_tabela in ARQUIVOS_TABELAS.items():
+            carregar_tabela(engine, arquivo_csv, nome_tabela)
+
+        print("\nCarga finalizada com sucesso.")
+
+    except Exception as e:
+        print(f"\nErro durante a carga: {e}")
+        raise
+
+
+if __name__ == "__main__":
+    main()
+
+================================================================================
+ARQUIVO: web/Dockerfile
+================================================================================
+
+FROM node:20-alpine AS deps
+WORKDIR /app
+
+COPY web/package*.json ./
+RUN npm ci
+
+FROM node:20-alpine AS builder
+WORKDIR /app
+
+ARG DATABASE_URL
+ARG DATABASE_SSL
+ARG ALERT_THRESHOLD
+ARG DB_HOST
+ARG DB_PORT
+ARG DB_NAME
+ARG DB_USER
+ARG DB_PASSWORD
+ARG DB_SCHEMA
+ARG CSV_DIR
+ARG GIT_SHA
+
+ENV DATABASE_URL=$DATABASE_URL
+ENV DATABASE_SSL=$DATABASE_SSL
+ENV ALERT_THRESHOLD=$ALERT_THRESHOLD
+ENV DB_HOST=$DB_HOST
+ENV DB_PORT=$DB_PORT
+ENV DB_NAME=$DB_NAME
+ENV DB_USER=$DB_USER
+ENV DB_PASSWORD=$DB_PASSWORD
+ENV DB_SCHEMA=$DB_SCHEMA
+ENV CSV_DIR=$CSV_DIR
+ENV GIT_SHA=$GIT_SHA
+
+COPY --from=deps /app/node_modules ./node_modules
+COPY web/. ./
+RUN npm run build
+
+FROM node:20-alpine AS runner
+WORKDIR /app
+
+ENV NODE_ENV=production
+ENV PORT=3000
+
+ARG DATABASE_URL
+ARG DATABASE_SSL
+ARG ALERT_THRESHOLD
+ARG DB_HOST
+ARG DB_PORT
+ARG DB_NAME
+ARG DB_USER
+ARG DB_PASSWORD
+ARG DB_SCHEMA
+ARG CSV_DIR
+ARG GIT_SHA
+
+ENV DATABASE_URL=$DATABASE_URL
+ENV DATABASE_SSL=$DATABASE_SSL
+ENV ALERT_THRESHOLD=$ALERT_THRESHOLD
+ENV DB_HOST=$DB_HOST
+ENV DB_PORT=$DB_PORT
+ENV DB_NAME=$DB_NAME
+ENV DB_USER=$DB_USER
+ENV DB_PASSWORD=$DB_PASSWORD
+ENV DB_SCHEMA=$DB_SCHEMA
+ENV CSV_DIR=$CSV_DIR
+ENV GIT_SHA=$GIT_SHA
+
+COPY --from=builder /app/public ./public
+COPY --from=builder /app/.next/standalone ./
+COPY --from=builder /app/.next/static ./.next/static
+
+EXPOSE 3000
+CMD ["node", "server.js"]
+
+================================================================================
+ARQUIVO: web/package.json
+================================================================================
+
+{
+  "name": "web",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "lint": "eslint"
+  },
+  "dependencies": {
+    "lucide-react": "^0.577.0",
+    "next": "16.1.6",
+    "pg": "^8.20.0",
+    "react": "19.2.3",
+    "react-dom": "19.2.3",
+    "recharts": "^3.8.0"
+  },
+  "devDependencies": {
+    "@tailwindcss/postcss": "^4",
+    "@types/node": "^20",
+    "@types/pg": "^8.18.0",
+    "@types/react": "^19",
+    "@types/react-dom": "^19",
+    "babel-plugin-react-compiler": "1.0.0",
+    "eslint": "^9",
+    "eslint-config-next": "16.1.6",
+    "tailwindcss": "^4",
+    "typescript": "^5"
+  }
+}
+
+
+================================================================================
+ARQUIVO: web/next.config.ts
+================================================================================
+
+import type { NextConfig } from "next";
+
+const nextConfig: NextConfig = {
+  /* config options here */
+  reactCompiler: true,
+  output: "standalone",
+};
+
+export default nextConfig;
+
+
+================================================================================
+ARQUIVO: web/tsconfig.json
+================================================================================
+
+{
+  "compilerOptions": {
+    "target": "ES2017",
+    "lib": ["dom", "dom.iterable", "esnext"],
+    "allowJs": true,
+    "skipLibCheck": true,
+    "strict": true,
+    "noEmit": true,
+    "esModuleInterop": true,
+    "module": "esnext",
+    "moduleResolution": "bundler",
+    "resolveJsonModule": true,
+    "isolatedModules": true,
+    "jsx": "react-jsx",
+    "incremental": true,
+    "plugins": [
+      {
+        "name": "next"
+      }
+    ],
+    "paths": {
+      "@/*": ["./src/*"]
+    }
+  },
+  "include": [
+    "next-env.d.ts",
+    "**/*.ts",
+    "**/*.tsx",
+    ".next/types/**/*.ts",
+    ".next/dev/types/**/*.ts",
+    "**/*.mts"
+  ],
+  "exclude": ["node_modules"]
+}
+
+
+================================================================================
+ARQUIVO: web/postcss.config.mjs
+================================================================================
+
+const config = {
+  plugins: {
+    "@tailwindcss/postcss": {},
+  },
+};
+
+export default config;
+
+
+================================================================================
+ARQUIVO: web/eslint.config.mjs
+================================================================================
+
+import { defineConfig, globalIgnores } from "eslint/config";
+import nextVitals from "eslint-config-next/core-web-vitals";
+import nextTs from "eslint-config-next/typescript";
+
+const eslintConfig = defineConfig([
+  ...nextVitals,
+  ...nextTs,
+  // Override default ignores of eslint-config-next.
+  globalIgnores([
+    // Default ignores of eslint-config-next:
+    ".next/**",
+    "out/**",
+    "build/**",
+    "next-env.d.ts",
+  ]),
+]);
+
+export default eslintConfig;
+
+
+================================================================================
+ARQUIVO: web/.env.local
+================================================================================
+
+DATABASE_URL=postgresql://postgres:admin@d4jgig.easypanel.host:5433/postgres
+DATABASE_SSL=false
+ALERT_THRESHOLD=60
+
+================================================================================
+ARQUIVO: web/src/app/globals.css
+================================================================================
+
+@import "tailwindcss";
+
+:root {
+  color-scheme: dark;
+}
+
+html,
+body {
+  min-height: 100%;
+  background:
+    radial-gradient(circle at top left, rgba(56, 189, 248, 0.18), transparent 26%),
+    radial-gradient(circle at top right, rgba(99, 102, 241, 0.16), transparent 24%),
+    linear-gradient(135deg, #04111e 0%, #071523 45%, #0a1b31 100%);
+  color: #f8fafc;
+}
+
+body {
+  font-family: Arial, Helvetica, sans-serif;
+}
+
+.glass {
+  background: linear-gradient(180deg,
+      rgba(15, 23, 42, 0.72) 0%,
+      rgba(15, 23, 42, 0.5) 100%);
+  backdrop-filter: blur(14px);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  box-shadow:
+    0 10px 30px rgba(2, 8, 23, 0.35),
+    inset 0 1px 0 rgba(255, 255, 255, 0.03);
+}
+
+.alert-glow {
+  box-shadow:
+    0 0 0 1px rgba(251, 191, 36, 0.18),
+    0 0 24px rgba(245, 158, 11, 0.18),
+    0 0 60px rgba(245, 158, 11, 0.08);
+}
+
+.alert-badge {
+  animation: pulse-alert 1.6s ease-in-out infinite;
+}
+
+@keyframes pulse-alert {
+  0% {
+    transform: scale(1);
+    box-shadow: 0 0 0 0 rgba(251, 191, 36, 0.32);
+    opacity: 0.92;
+  }
+
+  50% {
+    transform: scale(1.04);
+    box-shadow: 0 0 0 10px rgba(251, 191, 36, 0);
+    opacity: 1;
+  }
+
+  100% {
+    transform: scale(1);
+    box-shadow: 0 0 0 0 rgba(251, 191, 36, 0);
+    opacity: 0.92;
+  }
+}
+
+================================================================================
+ARQUIVO: web/src/app/layout.tsx
+================================================================================
+
+import type { Metadata } from "next";
+import "./globals.css";
+
+export const metadata: Metadata = {
+  title: "Taxa de Congestionamento | Painel",
+  description: "Painel executivo de taxa de congestionamento",
+};
+
+export default function RootLayout({
+  children,
+}: Readonly<{
+  children: React.ReactNode;
+}>) {
+  return (
+    <html lang="pt-BR" suppressHydrationWarning>
+      <body suppressHydrationWarning>{children}</body>
+    </html>
+  );
+}
+
+================================================================================
+ARQUIVO: web/src/app/page.tsx
+================================================================================
+
+import { AlertTriangle, CalendarDays, MapPin, Scale } from "lucide-react";
+import { FiltersPanel } from "@/components/FiltersPanel";
+import { SeriesChart } from "@/components/SeriesChart";
+// Backtest removido do painel para simplificar a leitura executiva.
+// Se quiser reativar depois, basta reimportar o componente abaixo.
+// import { BacktestTable } from "@/components/BacktestTable";
+import {
+  // getBacktestRanking,
+  getChartData,
+  getFilterOptions,
+  getSummary,
+  type Filters,
+  type GranularityMode,
+  type ScopeMode,
+} from "@/lib/dashboard";
+
+type SearchParams = Promise<{
+  scope?: string | string[];
+  granularity?: string | string[];
+  comarca?: string | string[];
+  serventia?: string | string[];
+  show6?: string | string[];
+  show12?: string | string[];
+}>;
+
+function getSingle(value?: string | string[]) {
+  return Array.isArray(value) ? value[0] : value;
+}
+
+function formatPercent(value?: number | null) {
+  if (value === undefined || value === null || Number.isNaN(value)) return "-";
+  return `${value.toFixed(2)}%`;
+}
+
+function formatMonthYear(value?: string | null) {
+  if (!value) return "-";
+  return new Intl.DateTimeFormat("pt-BR", {
+    month: "2-digit",
+    year: "numeric",
+  }).format(new Date(value));
+}
+
+function alertClass(value: number | null, threshold: number) {
+  if (value === null || value === undefined) return "border-white/10";
+  return value > threshold
+    ? "alert-glow border-amber-400/40"
+    : "border-white/10";
+}
+
+export default async function Page({
+  searchParams,
+}: {
+  searchParams: SearchParams;
+}) {
+  const params = await searchParams;
+
+  const rawScope = getSingle(params.scope);
+  const scope: ScopeMode = rawScope === "global" ? "global" : "unit";
+  const isGlobalScope = scope === "global";
+
+  const rawGranularity = getSingle(params.granularity);
+  const granularity: GranularityMode =
+    rawGranularity === "annual" ? "annual" : "monthly";
+
+  const requestedComarca = getSingle(params.comarca);
+  const filterOptions = await getFilterOptions(requestedComarca);
+
+  const comarca = requestedComarca || filterOptions.effectiveComarca;
+  const rawServentia = getSingle(params.serventia);
+  const serventia =
+    rawServentia && filterOptions.serventias.includes(rawServentia)
+      ? rawServentia
+      : filterOptions.serventias[0] || "";
+
+  const hasForecastParams =
+    params.show6 !== undefined || params.show12 !== undefined;
+
+  const parsedShow6 = hasForecastParams ? getSingle(params.show6) === "1" : true;
+  const parsedShow12 = hasForecastParams
+    ? getSingle(params.show12) === "1"
+    : scope === "global"
+      ? false
+      : true;
+
+  const show6 = isGlobalScope ? false : parsedShow6;
+  const show12 = isGlobalScope ? false : parsedShow12;
+
+  const filters: Filters = {
+    scope,
+    granularity,
+    comarca,
+    serventia,
+    ano: "Todos",
+    show6,
+    show12,
+  };
+
+  const threshold = Number(process.env.ALERT_THRESHOLD || 60);
+
+  const canLoad =
+    scope === "global" || (Boolean(comarca) && Boolean(serventia));
+
+  const [summary, chartData] = canLoad
+    ? await Promise.all([
+      getSummary(filters),
+      getChartData(filters),
+      // Backtest removido do painel:
+      // getBacktestRanking(filters),
+    ])
+    : [null, []];
+
+  const badgeText =
+    scope === "global"
+      ? `Global • Base até ${formatMonthYear(summary?.base_date)}`
+      : `Base até ${formatMonthYear(summary?.base_date)}`;
+
+  const chartDescription =
+    scope === "global"
+      ? "Visão global consolidada de todas as comarcas e serventias, com foco na leitura histórica agregada."
+      : "O ponto da previsão pulsa quando ultrapassa o limite de alerta.";
+
+  const cardLabel6 = "Previsão 6 meses";
+  const cardLabel12 = "Previsão 12 meses";
+
+  const cardValue6 = formatPercent(summary?.metric_6);
+  const cardValue12 = formatPercent(summary?.metric_12);
+
+  const showAlert6 = !isGlobalScope && (summary?.metric_6 ?? 0) > threshold;
+  const showAlert12 = !isGlobalScope && (summary?.metric_12 ?? 0) > threshold;
+
+  const effectiveShow6 = !isGlobalScope && show6;
+  const effectiveShow12 = !isGlobalScope && show12;
+  const effectiveShowThreshold = !isGlobalScope;
+
+  return (
+    <main className="min-h-screen px-4 py-6 lg:px-6">
+      <div className="mx-auto max-w-[1600px]">
+        <header className="mb-6 flex flex-col gap-4 rounded-3xl border border-white/10 bg-slate-950/40 px-5 py-5 backdrop-blur md:flex-row md:items-center md:justify-between">
+          <div>
+            <h1 className="text-3xl font-bold tracking-tight text-white">
+              Taxa de Congestionamento
+            </h1>
+            <p className="mt-1 text-sm text-slate-300">
+              Painel Executivo • Real x Previsão
+            </p>
+          </div>
+
+          <div className="inline-flex items-center gap-2 rounded-full border border-cyan-400/20 bg-cyan-400/10 px-4 py-2 text-sm text-cyan-200">
+            <CalendarDays size={16} />
+            {badgeText}
+          </div>
+        </header>
+
+        <section className="grid gap-6 lg:grid-cols-[320px_1fr]">
+          <FiltersPanel
+            comarcas={filterOptions.comarcas}
+            serventias={filterOptions.serventias}
+            current={{
+              scope,
+              granularity,
+              comarca,
+              serventia,
+              show6,
+              show12,
+            }}
+          />
+
+          <div className="space-y-6">
+            {!isGlobalScope && (
+              <div className="grid gap-4 xl:grid-cols-[1.2fr_1fr_1fr]">
+                <div className="glass rounded-3xl p-5 lg:p-6">
+                  <div className="mb-3 text-xs font-bold uppercase tracking-[0.18em] text-slate-300">
+                    Últimos 3 meses (real)
+                  </div>
+
+                  <div className="text-4xl font-bold tracking-tight text-white">
+                    {`${formatPercent(summary?.real_m1)} | ${formatPercent(summary?.real_m2)} | ${formatPercent(summary?.real_m3)}`}
+                  </div>
+
+                  <div className="mt-3 flex items-center gap-2 text-sm text-slate-300">
+                    <MapPin size={15} />
+                    {summary?.unit_label || "Selecione um recorte"}
+                  </div>
+                </div>
+
+                <div
+                  className={`glass rounded-3xl border p-5 lg:p-6 ${alertClass(
+                    summary?.metric_6 ?? null,
+                    threshold
+                  )}`}
+                >
+                  <div className="mb-3 flex items-center justify-between gap-3">
+                    <div className="text-xs font-bold uppercase tracking-[0.18em] text-slate-300">
+                      {cardLabel6}
+                    </div>
+                    {showAlert6 && (
+                      <span className="alert-badge inline-flex items-center gap-1 rounded-full bg-amber-400/20 px-3 py-1 text-xs font-semibold text-amber-200">
+                        <AlertTriangle size={14} />
+                        ALERTA
+                      </span>
+                    )}
+                  </div>
+
+                  <div className="text-5xl font-bold tracking-tight text-amber-300">
+                    {cardValue6}
+                  </div>
+
+                  <div className="mt-3 text-sm text-slate-300">
+                    modelo:{" "}
+                    <span className="text-white">{summary?.model_6 || "-"}</span>
+                  </div>
+                </div>
+
+                <div
+                  className={`glass rounded-3xl border p-5 lg:p-6 ${alertClass(
+                    summary?.metric_12 ?? null,
+                    threshold
+                  )}`}
+                >
+                  <div className="mb-3 flex items-center justify-between gap-3">
+                    <div className="text-xs font-bold uppercase tracking-[0.18em] text-slate-300">
+                      {cardLabel12}
+                    </div>
+                    {showAlert12 && (
+                      <span className="alert-badge inline-flex items-center gap-1 rounded-full bg-amber-400/20 px-3 py-1 text-xs font-semibold text-amber-200">
+                        <AlertTriangle size={14} />
+                        ALERTA
+                      </span>
+                    )}
+                  </div>
+
+                  <div className="text-5xl font-bold tracking-tight text-violet-300">
+                    {cardValue12}
+                  </div>
+
+                  <div className="mt-3 text-sm text-slate-300">
+                    modelo:{" "}
+                    <span className="text-white">{summary?.model_12 || "-"}</span>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            <SeriesChart
+              data={chartData}
+              threshold={threshold}
+              show6={effectiveShow6}
+              show12={effectiveShow12}
+              showThreshold={effectiveShowThreshold}
+              description={chartDescription}
+              scope={scope}
+              granularity={granularity}
+            />
+
+            {/* Backtest removido do painel para reduzir ruído visual e evitar confusão com a coluna "Pontos". */}
+            {/* Se quiser reativar depois, basta restaurar o import e o bloco abaixo. */}
+            {/*
+            <div className="grid gap-6 xl:grid-cols-[1fr_320px]">
+              <BacktestTable rows={backtestRows} />
+            </div>
+            */}
+
+            <div className="glass rounded-3xl p-5 lg:p-6">
+              <div className="mb-4 flex items-center gap-2 text-white">
+                <Scale size={18} />
+                <h3 className="text-lg font-semibold">Leitura do painel</h3>
+              </div>
+
+              <div className="space-y-3 text-sm leading-6 text-slate-300">
+                <p>
+                  O painel apresenta a <strong>série histórica real</strong> e,
+                  no escopo de unidade, também permite visualizar as{" "}
+                  <strong>projeções de 6 e 12 meses</strong> a partir da base
+                  mais recente.
+                </p>
+
+                <p>
+                  Os cards superiores mostram os <strong>últimos valores reais</strong>{" "}
+                  observados e os <strong>resultados previstos</strong> pelos
+                  modelos selecionados para o recorte atual.
+                </p>
+
+                <p>
+                  O destaque visual e a bolinha pulsante aparecem quando a
+                  previsão ultrapassa <strong>{threshold}%</strong>, sinalizando
+                  um ponto de atenção para acompanhamento gerencial.
+                </p>
+
+                {scope === "global" && (
+                  <p>
+                    Na visão global, o gráfico consolida as informações de todas
+                    as unidades e prioriza uma leitura executiva agregada, sem
+                    exibir as projeções por unidade.
+                  </p>
+                )}
+
+                {scope === "unit" && (
+                  <p>
+                    Utilize os filtros de comarca e serventia para refinar a
+                    análise e comparar o comportamento da série conforme o
+                    recorte desejado.
+                  </p>
+                )}
+              </div>
+            </div>
+          </div>
+        </section>
+      </div>
+    </main>
+  );
+}
+
+================================================================================
+ARQUIVO: web/src/components/BacktestTable.tsx
+================================================================================
+
+import type { BacktestRow } from "@/lib/dashboard";
+
+// Componente mantido apenas para referência futura.
+// No momento ele não está mais sendo renderizado no page.tsx.
+
+type Props = {
+    rows: BacktestRow[];
+};
+
+export function BacktestTable({ rows }: Props) {
+    return (
+        <div className="glass rounded-3xl p-5 lg:p-6">
+            <div className="mb-4">
+                <h3 className="text-lg font-semibold text-white">Backtest resumido</h3>
+                <p className="text-sm text-slate-400">
+                    Menor MAE = melhor aderência histórica.
+                </p>
+            </div>
+
+            <div className="overflow-x-auto">
+                <table className="w-full border-collapse text-sm">
+                    <thead>
+                        <tr className="border-b border-white/10 text-left text-slate-300">
+                            <th className="px-3 py-3">Modelo</th>
+                            <th className="px-3 py-3">MAE</th>
+                            <th className="px-3 py-3">Pontos</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {rows.length > 0 ? (
+                            rows.map((row) => (
+                                <tr
+                                    key={row.model}
+                                    className="border-b border-white/5 text-slate-100"
+                                >
+                                    <td className="px-3 py-3">{row.model}</td>
+                                    <td className="px-3 py-3">{row.mae.toFixed(2)}</td>
+                                    <td className="px-3 py-3">{row.pontos}</td>
+                                </tr>
+                            ))
+                        ) : (
+                            <tr>
+                                <td
+                                    colSpan={3}
+                                    className="px-3 py-6 text-center text-slate-400"
+                                >
+                                    Nenhum dado de backtest encontrado para o recorte selecionado.
+                                </td>
+                            </tr>
+                        )}
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    );
+}
+
+================================================================================
+ARQUIVO: web/src/components/FiltersPanel.tsx
+================================================================================
+
+"use client";
+
+import { useEffect, useState, useTransition } from "react";
+import { LoaderCircle } from "lucide-react";
+import { usePathname, useRouter, useSearchParams } from "next/navigation";
+
+type Props = {
+    comarcas: string[];
+    serventias: string[];
+    current: {
+        scope: "unit" | "global";
+        granularity: "monthly" | "annual";
+        comarca: string;
+        serventia: string;
+        show6: boolean;
+        show12: boolean;
+    };
+};
+
+type FormState = Props["current"];
+
+function normalizeFormState(state: FormState): FormState {
+    if (state.scope === "global") {
+        return {
+            ...state,
+            show6: false,
+            show12: false,
+        };
+    }
+
+    return state;
+}
+
+export function FiltersPanel({
+    comarcas,
+    serventias,
+    current,
+}: Props) {
+    const router = useRouter();
+    const pathname = usePathname();
+    const searchParams = useSearchParams();
+    const [isPending, startTransition] = useTransition();
+    const [form, setForm] = useState<FormState>(normalizeFormState(current));
+
+    useEffect(() => {
+        setForm(normalizeFormState(current));
+    }, [current]);
+
+    const isGlobalScope = form.scope === "global";
+
+    function pushQuery(nextState: FormState, options?: { resetServentia?: boolean }) {
+        const next = normalizeFormState(nextState);
+
+        startTransition(() => {
+            const params = new URLSearchParams(searchParams.toString());
+
+            params.set("scope", next.scope);
+            params.set("granularity", next.granularity);
+
+            // Mantém o painel sempre trabalhando com toda a base histórica.
+            params.delete("ano");
+
+            if (next.scope === "unit") {
+                params.set("comarca", next.comarca);
+
+                if (options?.resetServentia) {
+                    params.delete("serventia");
+                } else if (next.serventia) {
+                    params.set("serventia", next.serventia);
+                }
+            } else {
+                params.delete("comarca");
+                params.delete("serventia");
+            }
+
+            if (next.scope === "unit" && next.show6) {
+                params.set("show6", "1");
+            } else {
+                params.delete("show6");
+            }
+
+            if (next.scope === "unit" && next.show12) {
+                params.set("show12", "1");
+            } else {
+                params.delete("show12");
+            }
+
+            const qs = params.toString();
+            router.replace(qs ? `${pathname}?${qs}` : pathname, { scroll: false });
+        });
+    }
+
+    function onScopeChange(value: "unit" | "global") {
+        const next: FormState =
+            value === "global"
+                ? {
+                    ...form,
+                    scope: value,
+                    show6: false,
+                    show12: false,
+                }
+                : {
+                    ...form,
+                    scope: value,
+                };
+
+        setForm(next);
+        pushQuery(next);
+    }
+
+    function onGranularityChange(value: "monthly" | "annual") {
+        const next = normalizeFormState({ ...form, granularity: value });
+        setForm(next);
+        pushQuery(next);
+    }
+
+    function onComarcaChange(value: string) {
+        const next = normalizeFormState({ ...form, comarca: value });
+        setForm(next);
+        pushQuery(next, { resetServentia: true });
+    }
+
+    function onServentiaChange(value: string) {
+        const next = normalizeFormState({ ...form, serventia: value });
+        setForm(next);
+        pushQuery(next);
+    }
+
+    function onToggleForecast(key: "show6" | "show12", checked: boolean) {
+        const next = normalizeFormState({ ...form, [key]: checked });
+        setForm(next);
+        pushQuery(next);
+    }
+
+    return (
+        <aside className="glass rounded-3xl p-5 lg:sticky lg:top-6">
+            <div className="mb-5">
+                <h2 className="text-2xl font-semibold text-white">Filtros</h2>
+                <p className="mt-1 text-sm text-slate-300">
+                    Refine a análise por recorte.
+                </p>
+            </div>
+
+            <div className="space-y-5">
+                <div>
+                    <label className="mb-2 block text-xs font-bold uppercase tracking-[0.18em] text-slate-300">
+                        Escopo
+                    </label>
+                    <select
+                        value={form.scope}
+                        onChange={(e) => onScopeChange(e.target.value as "unit" | "global")}
+                        disabled={isPending}
+                        className="w-full rounded-2xl border border-white/10 bg-slate-900/50 px-4 py-3 text-white outline-none transition focus:border-cyan-400 disabled:opacity-70"
+                    >
+                        <option value="unit">Unidade</option>
+                        <option value="global">Global</option>
+                    </select>
+                </div>
+
+                <div>
+                    <label className="mb-2 block text-xs font-bold uppercase tracking-[0.18em] text-slate-300">
+                        Visão
+                    </label>
+                    <select
+                        value={form.granularity}
+                        onChange={(e) =>
+                            onGranularityChange(e.target.value as "monthly" | "annual")
+                        }
+                        disabled={isPending}
+                        className="w-full rounded-2xl border border-white/10 bg-slate-900/50 px-4 py-3 text-white outline-none transition focus:border-cyan-400 disabled:opacity-70"
+                    >
+                        <option value="monthly">Mensal</option>
+                        <option value="annual">Anual</option>
+                    </select>
+                </div>
+
+                {form.scope === "unit" && (
+                    <>
+                        <div>
+                            <label className="mb-2 block text-xs font-bold uppercase tracking-[0.18em] text-slate-300">
+                                Comarca
+                            </label>
+                            <select
+                                value={form.comarca}
+                                onChange={(e) => onComarcaChange(e.target.value)}
+                                disabled={isPending}
+                                className="w-full rounded-2xl border border-white/10 bg-slate-900/50 px-4 py-3 text-white outline-none transition focus:border-cyan-400 disabled:opacity-70"
+                            >
+                                {comarcas.map((item) => (
+                                    <option key={item} value={item}>
+                                        {item}
+                                    </option>
+                                ))}
+                            </select>
+                        </div>
+
+                        <div>
+                            <label className="mb-2 block text-xs font-bold uppercase tracking-[0.18em] text-slate-300">
+                                Serventia
+                            </label>
+                            <select
+                                value={form.serventia}
+                                onChange={(e) => onServentiaChange(e.target.value)}
+                                disabled={isPending}
+                                className="w-full rounded-2xl border border-white/10 bg-slate-900/50 px-4 py-3 text-white outline-none transition focus:border-cyan-400 disabled:opacity-70"
+                            >
+                                {serventias.map((item) => (
+                                    <option key={item} value={item}>
+                                        {item}
+                                    </option>
+                                ))}
+                            </select>
+                        </div>
+                    </>
+                )}
+
+                {!isGlobalScope ? (
+                    <div>
+                        <span className="mb-2 block text-xs font-bold uppercase tracking-[0.18em] text-slate-300">
+                            Exibir previsões
+                        </span>
+
+                        <label className="mb-2 flex items-center gap-3 text-sm text-slate-200">
+                            <input
+                                type="checkbox"
+                                checked={form.show6}
+                                onChange={(e) => onToggleForecast("show6", e.target.checked)}
+                                disabled={isPending}
+                                className="h-4 w-4 accent-cyan-400"
+                            />
+                            Linha 6 meses
+                        </label>
+
+                        <label className="flex items-center gap-3 text-sm text-slate-200">
+                            <input
+                                type="checkbox"
+                                checked={form.show12}
+                                onChange={(e) => onToggleForecast("show12", e.target.checked)}
+                                disabled={isPending}
+                                className="h-4 w-4 accent-cyan-400"
+                            />
+                            Linha 12 meses
+                        </label>
+                    </div>
+                ) : (
+                    <div className="rounded-2xl border border-white/10 bg-slate-950/30 px-4 py-3 text-xs leading-5 text-slate-300">
+                        Na visão global, o painel exibe somente a série histórica
+                        consolidada de todas as comarcas e serventias.
+                        <br />
+                        As previsões continuam disponíveis apenas no escopo de unidade.
+                    </div>
+                )}
+
+                <div className="rounded-2xl border border-white/10 bg-slate-950/30 px-4 py-3 text-xs text-slate-300">
+                    <div>
+                        {isPending ? (
+                            <span className="inline-flex items-center gap-2 text-cyan-300">
+                                <LoaderCircle size={14} className="animate-spin" />
+                                Atualizando painel...
+                            </span>
+                        ) : (
+                            <span>
+                                Atualização automática ativada. Ao trocar um filtro, o painel
+                                recarrega sozinho.
+                            </span>
+                        )}
+                    </div>
+
+                    <div className="mt-3 border-t border-white/10 pt-3 leading-5 text-slate-300">
+                        Solução desenvolvida pela{" "}
+                        <strong className="text-white">
+                            Diretoria de Inteligência Artificial, Ciência de Dados e
+                            Estatística – DIACDE
+                        </strong>.
+                    </div>
+                </div>
+            </div>
+        </aside>
+    );
+}
+
+================================================================================
+ARQUIVO: web/src/components/SeriesChart.tsx
+================================================================================
+
+"use client";
+
+import type { ChartPoint, GranularityMode, ScopeMode } from "@/lib/dashboard";
+import {
+    CartesianGrid,
+    Line,
+    LineChart,
+    ReferenceLine,
+    ResponsiveContainer,
+    Tooltip,
+    XAxis,
+    YAxis,
+} from "recharts";
+
+type Props = {
+    data: ChartPoint[];
+    threshold: number;
+    show6: boolean;
+    show12: boolean;
+    showThreshold: boolean;
+    description: string;
+    scope: ScopeMode;
+    granularity: GranularityMode;
+};
+
+type ChartDotProps = {
+    cx?: number;
+    cy?: number;
+    value?: number | string | null;
+    dataKey?: string | number | ((obj: any) => any);
+    stroke?: string;
+    fill?: string;
+    payload?: ChartPoint;
+};
+
+function formatPercent(value: number | string | null | undefined) {
+    if (value === null || value === undefined) return "-";
+    return `${Number(value).toFixed(2)}%`;
+}
+
+function LegendItem({
+    color,
+    label,
+    dashed = false,
+    subtle = false,
+}: {
+    color: string;
+    label: string;
+    dashed?: boolean;
+    subtle?: boolean;
+}) {
+    return (
+        <div
+            className={`inline-flex items-center gap-2 text-sm ${subtle ? "text-slate-400" : "text-slate-200"
+                }`}
+        >
+            <span
+                className="inline-block h-3 w-3 rounded-full"
+                style={{
+                    backgroundColor: color,
+                    opacity: subtle ? 0.65 : 1,
+                    boxShadow: subtle ? "none" : `0 0 12px ${color}`,
+                    border: dashed ? "2px dashed rgba(255,255,255,0.45)" : "none",
+                }}
+            />
+            <span>{label}</span>
+        </div>
+    );
+}
+
+function CustomTooltip({
+    active,
+    payload,
+    label,
+}: {
+    active?: boolean;
+    payload?: Array<{
+        dataKey?: string;
+        name?: string;
+        value?: number | string | null;
+        color?: string;
+    }>;
+    label?: string;
+}) {
+    if (!active || !payload || payload.length === 0) return null;
+
+    const filtered = payload.filter(
+        (item) =>
+            item.value !== null &&
+            item.value !== undefined &&
+            item.dataKey !== "connector6" &&
+            item.dataKey !== "connector12"
+    );
+
+    if (filtered.length === 0) return null;
+
+    const order = ["real", "prev6", "prev12"];
+    filtered.sort(
+        (a, b) => order.indexOf(String(a.dataKey)) - order.indexOf(String(b.dataKey))
+    );
+
+    return (
+        <div className="rounded-2xl border border-white/10 bg-slate-950/95 px-4 py-3 shadow-2xl">
+            <div className="mb-2 text-base font-semibold text-white">{label}</div>
+
+            <div className="space-y-1.5">
+                {filtered.map((item) => (
+                    <div
+                        key={`${item.dataKey}-${item.name}`}
+                        className="flex items-center justify-between gap-4"
+                    >
+                        <div className="flex items-center gap-2">
+                            <span
+                                className="inline-block h-3 w-3 rounded-full"
+                                style={{ backgroundColor: item.color || "#fff" }}
+                            />
+                            <span className="text-sm text-slate-200">{item.name}</span>
+                        </div>
+                        <span className="text-sm font-semibold text-white">
+                            {formatPercent(item.value)}
+                        </span>
+                    </div>
+                ))}
+            </div>
+        </div>
+    );
+}
+
+export function SeriesChart({
+    data,
+    threshold,
+    show6,
+    show12,
+    showThreshold,
+    description,
+    scope,
+    granularity,
+}: Props) {
+    const isGlobalScope = scope === "global";
+    const annualExecutive = isGlobalScope && granularity === "annual";
+
+    const chartData = isGlobalScope
+        ? data.filter((d) => d.real !== null && d.real !== undefined)
+        : data;
+
+    const realPointCount = chartData.filter(
+        (d) => d.real !== null && d.real !== undefined
+    ).length;
+
+    const hasSingleRealPoint = realPointCount === 1;
+
+    const show6Line = !isGlobalScope && show6;
+    const show12Line = !isGlobalScope && show12;
+    const showThresholdLine = !isGlobalScope && showThreshold;
+
+    const chartTitle = isGlobalScope
+        ? granularity === "annual"
+            ? "Série anual consolidada"
+            : "Série mensal consolidada"
+        : "Série temporal (real x previsão)";
+
+    const chartDescription = isGlobalScope
+        ? granularity === "annual"
+            ? "Visão global consolidada de todas as comarcas e serventias, em base anual."
+            : "Visão global consolidada de todas as comarcas e serventias, em base mensal."
+        : description;
+
+    const lastPrev6Date =
+        [...data].filter((d) => d.prev6 !== null && d.prev6 !== undefined).at(-1)
+            ?.date ?? null;
+
+    const lastPrev12Date =
+        [...data].filter((d) => d.prev12 !== null && d.prev12 !== undefined).at(-1)
+            ?.date ?? null;
+
+    function renderDot(series: "real" | "prev6" | "prev12") {
+        return (props: ChartDotProps) => {
+            const { cx, cy, value, dataKey, stroke, fill, payload } = props;
+
+            if (
+                cx === undefined ||
+                cy === undefined ||
+                value === null ||
+                value === undefined ||
+                !payload
+            ) {
+                return null;
+            }
+
+            const numericValue = Number(value);
+            const color = stroke || fill || "#ffffff";
+            const pointDate = payload.date;
+            const key = String(dataKey ?? series);
+
+            if (!isGlobalScope) {
+                const isForecast = key === "prev6" || key === "prev12";
+                const isAlert = isForecast && numericValue > threshold;
+
+                if (isAlert) {
+                    return (
+                        <g>
+                            <circle cx={cx} cy={cy} r={7} fill={color} opacity={0.95} />
+                            <circle
+                                cx={cx}
+                                cy={cy}
+                                r={10}
+                                fill="none"
+                                stroke={color}
+                                strokeWidth={2}
+                                opacity={0.7}
+                            >
+                                <animate
+                                    attributeName="r"
+                                    values="10;18;10"
+                                    dur="1.3s"
+                                    repeatCount="indefinite"
+                                />
+                                <animate
+                                    attributeName="opacity"
+                                    values="0.7;0.05;0.7"
+                                    dur="1.3s"
+                                    repeatCount="indefinite"
+                                />
+                            </circle>
+                            <circle
+                                cx={cx}
+                                cy={cy}
+                                r={14}
+                                fill="none"
+                                stroke={color}
+                                strokeWidth={1.5}
+                                opacity={0.35}
+                            >
+                                <animate
+                                    attributeName="r"
+                                    values="14;24;14"
+                                    dur="1.7s"
+                                    repeatCount="indefinite"
+                                />
+                                <animate
+                                    attributeName="opacity"
+                                    values="0.35;0.03;0.35"
+                                    dur="1.7s"
+                                    repeatCount="indefinite"
+                                />
+                            </circle>
+                        </g>
+                    );
+                }
+
+                if (isForecast) {
+                    return (
+                        <circle
+                            cx={cx}
+                            cy={cy}
+                            r={5}
+                            fill={color}
+                            stroke="white"
+                            strokeWidth={1.5}
+                        />
+                    );
+                }
+
+                return (
+                    <circle
+                        cx={cx}
+                        cy={cy}
+                        r={3.5}
+                        fill={color}
+                        stroke="white"
+                        strokeWidth={1}
+                    />
+                );
+            }
+
+            if (series === "real") {
+                if (hasSingleRealPoint) {
+                    return (
+                        <circle
+                            cx={cx}
+                            cy={cy}
+                            r={6}
+                            fill={color}
+                            stroke="white"
+                            strokeWidth={1.5}
+                        />
+                    );
+                }
+
+                return annualExecutive ? null : (
+                    <circle cx={cx} cy={cy} r={2.5} fill={color} opacity={0.65} />
+                );
+            }
+
+            const isLastForecast =
+                (series === "prev6" && pointDate === lastPrev6Date) ||
+                (series === "prev12" && pointDate === lastPrev12Date);
+
+            if (!isLastForecast) {
+                return null;
+            }
+
+            const isAlert = numericValue > threshold;
+
+            if (isAlert) {
+                return (
+                    <g>
+                        <circle cx={cx} cy={cy} r={7} fill={color} opacity={0.98} />
+                        <circle
+                            cx={cx}
+                            cy={cy}
+                            r={10}
+                            fill="none"
+                            stroke={color}
+                            strokeWidth={2}
+                            opacity={0.7}
+                        >
+                            <animate
+                                attributeName="r"
+                                values="10;18;10"
+                                dur="1.5s"
+                                repeatCount="indefinite"
+                            />
+                            <animate
+                                attributeName="opacity"
+                                values="0.7;0.04;0.7"
+                                dur="1.5s"
+                                repeatCount="indefinite"
+                            />
+                        </circle>
+                        <circle
+                            cx={cx}
+                            cy={cy}
+                            r={15}
+                            fill="none"
+                            stroke={color}
+                            strokeWidth={1.5}
+                            opacity={0.28}
+                        >
+                            <animate
+                                attributeName="r"
+                                values="15;26;15"
+                                dur="1.9s"
+                                repeatCount="indefinite"
+                            />
+                            <animate
+                                attributeName="opacity"
+                                values="0.28;0.03;0.28"
+                                dur="1.9s"
+                                repeatCount="indefinite"
+                            />
+                        </circle>
+                    </g>
+                );
+            }
+
+            return (
+                <circle
+                    cx={cx}
+                    cy={cy}
+                    r={6}
+                    fill={color}
+                    stroke="white"
+                    strokeWidth={1.5}
+                />
+            );
+        };
+    }
+
+    return (
+        <div className="glass rounded-3xl p-5 lg:p-6">
+            <div className="mb-4 flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+                <div>
+                    <h3 className="text-lg font-semibold text-white">{chartTitle}</h3>
+                    <p className="text-sm text-slate-400">{chartDescription}</p>
+                </div>
+
+                <div className="flex flex-wrap items-center gap-4">
+                    <LegendItem color="#34d399" label="Real" />
+                    {show6Line && <LegendItem color="#38bdf8" label="Prev. 6m" dashed />}
+                    {show12Line && (
+                        <LegendItem color="#a78bfa" label="Prev. 12m" dashed />
+                    )}
+                </div>
+            </div>
+
+            <div className="h-[420px] w-full">
+                <ResponsiveContainer width="100%" height="100%">
+                    <LineChart
+                        data={chartData}
+                        margin={{ top: 15, right: 20, left: 0, bottom: 5 }}
+                    >
+                        <CartesianGrid
+                            stroke="rgba(148,163,184,0.12)"
+                            strokeDasharray="3 3"
+                        />
+
+                        <XAxis
+                            dataKey="label"
+                            tick={{ fill: "#cbd5e1", fontSize: 12 }}
+                            tickLine={false}
+                            axisLine={false}
+                        />
+
+                        <YAxis
+                            domain={[0, 100]}
+                            tickFormatter={(value) => `${value}%`}
+                            tick={{ fill: "#cbd5e1", fontSize: 12 }}
+                            tickLine={false}
+                            axisLine={false}
+                        />
+
+                        <Tooltip content={<CustomTooltip />} />
+
+                        {showThresholdLine && (
+                            <ReferenceLine
+                                y={threshold}
+                                stroke="#f59e0b"
+                                strokeDasharray="5 5"
+                                label={{
+                                    value: `Alerta ${threshold}%`,
+                                    fill: "#fbbf24",
+                                    fontSize: 12,
+                                }}
+                            />
+                        )}
+
+                        <Line
+                            type="monotone"
+                            dataKey="real"
+                            name="Real"
+                            stroke="#34d399"
+                            strokeWidth={isGlobalScope ? 3.5 : 3}
+                            dot={renderDot("real")}
+                            activeDot={{ r: hasSingleRealPoint ? 7 : 5 }}
+                            connectNulls
+                        />
+
+                        {show6Line && !isGlobalScope && (
+                            <Line
+                                type="linear"
+                                dataKey="connector6"
+                                stroke="#38bdf8"
+                                strokeWidth={2}
+                                strokeDasharray="3 4"
+                                dot={false}
+                                activeDot={false}
+                                connectNulls
+                                isAnimationActive={false}
+                            />
+                        )}
+
+                        {show6Line && (
+                            <Line
+                                type="monotone"
+                                dataKey="prev6"
+                                name="Prev. 6m"
+                                stroke="#38bdf8"
+                                strokeWidth={3}
+                                strokeDasharray="6 4"
+                                dot={renderDot("prev6")}
+                                activeDot={{ r: 6 }}
+                                connectNulls
+                            />
+                        )}
+
+                        {show12Line && !isGlobalScope && (
+                            <Line
+                                type="linear"
+                                dataKey="connector12"
+                                stroke="#a78bfa"
+                                strokeWidth={2}
+                                strokeDasharray="3 4"
+                                dot={false}
+                                activeDot={false}
+                                connectNulls
+                                isAnimationActive={false}
+                            />
+                        )}
+
+                        {show12Line && (
+                            <Line
+                                type="monotone"
+                                dataKey="prev12"
+                                name="Prev. 12m"
+                                stroke="#a78bfa"
+                                strokeWidth={3}
+                                strokeDasharray="6 4"
+                                dot={renderDot("prev12")}
+                                activeDot={{ r: 6 }}
+                                connectNulls
+                            />
+                        )}
+                    </LineChart>
+                </ResponsiveContainer>
+            </div>
+        </div>
+    );
+}
+
+================================================================================
+ARQUIVO: web/src/lib/dashboard.ts
+================================================================================
+
+import { pool } from "@/lib/db";
+
+export type ScopeMode = "unit" | "global";
+export type GranularityMode = "monthly" | "annual";
+export type DashboardMode = "forecast" | "backtest";
+
+export type Filters = {
+    scope: ScopeMode;
+    granularity: GranularityMode;
+    comarca: string;
+    serventia: string;
+    ano: string;
+    show6: boolean;
+    show12: boolean;
+};
+
+export type FilterOptions = {
+    comarcas: string[];
+    serventias: string[];
+    anos: string[];
+    effectiveComarca: string;
+};
+
+export type SummaryData = {
+    mode: DashboardMode;
+    base_date: string | null;
+    unit_label: string;
+    model_6: string;
+    model_12: string;
+    real_m1: number | null;
+    real_m2: number | null;
+    real_m3: number | null;
+    metric_6: number | null;
+    metric_12: number | null;
+};
+
+export type ChartPoint = {
+    date: string;
+    label: string;
+    real: number | null;
+    prev6: number | null;
+    prev12: number | null;
+    connector6: number | null;
+    connector12: number | null;
+};
+
+export type BacktestRow = {
+    model: string;
+    mae: number;
+    pontos: number;
+};
+
+const tableColumnsCache = new Map<string, string[]>();
+
+function toNumber(value: unknown): number | null {
+    if (value === null || value === undefined || value === "") return null;
+    const n = Number(value);
+    return Number.isFinite(n) ? n : null;
+}
+
+function toISODate(value: string | Date): string {
+    return new Date(value).toISOString().slice(0, 10);
+}
+
+function formatBucketLabel(
+    value: string | Date,
+    granularity: GranularityMode
+): string {
+    const date = new Date(value);
+
+    if (granularity === "annual") {
+        return String(date.getUTCFullYear());
+    }
+
+    return new Intl.DateTimeFormat("pt-BR", {
+        month: "2-digit",
+        year: "numeric",
+        timeZone: "UTC",
+    }).format(date);
+}
+
+function quoteIdent(identifier: string): string {
+    return `"${identifier.replace(/"/g, '""')}"`;
+}
+
+function getBucketExpr(granularity: GranularityMode): string {
+    if (granularity === "annual") {
+        return `date_trunc('year', ds)::date`;
+    }
+
+    return `date_trunc('month', ds)::date`;
+}
+
+function createEmptyChartPoint(
+    value: string | Date,
+    granularity: GranularityMode
+): ChartPoint {
+    return {
+        date: toISODate(value),
+        label: formatBucketLabel(value, granularity),
+        real: null,
+        prev6: null,
+        prev12: null,
+        connector6: null,
+        connector12: null,
+    };
+}
+
+function sortByBucketAsc<T extends { bucket: string | Date }>(a: T, b: T) {
+    return (
+        new Date(String(a.bucket)).getTime() -
+        new Date(String(b.bucket)).getTime()
+    );
+}
+
+async function getTableColumns(tableName: string): Promise<string[]> {
+    const cached = tableColumnsCache.get(tableName);
+    if (cached) return cached;
+
+    const result = await pool.query<{ column_name: string }>(
+        `
+    SELECT column_name
+    FROM information_schema.columns
+    WHERE table_schema = 'public'
+      AND table_name = $1
+    ORDER BY ordinal_position
+    `,
+        [tableName]
+    );
+
+    const columns = result.rows.map((r) => r.column_name);
+    tableColumnsCache.set(tableName, columns);
+    return columns;
+}
+
+function pickColumn(
+    columns: string[],
+    candidates: string[],
+    tableName: string,
+    label: string
+): string {
+    const found = candidates.find((candidate) => columns.includes(candidate));
+
+    if (!found) {
+        throw new Error(
+            `Não encontrei a coluna de ${label} na tabela ${tableName}. Colunas disponíveis: ${columns.join(", ")}`
+        );
+    }
+
+    return found;
+}
+
+async function getRealValueColumn(): Promise<string> {
+    const columns = await getTableColumns("bi_timeseries_real_long");
+    return pickColumn(
+        columns,
+        ["y_real", "y"],
+        "bi_timeseries_real_long",
+        "valor real"
+    );
+}
+
+async function getForecastMeta() {
+    const columns = await getTableColumns("bi_forecast_champion_long");
+
+    return {
+        horizonColumn: pickColumn(
+            columns,
+            ["horizon"],
+            "bi_forecast_champion_long",
+            "horizonte"
+        ),
+        predColumn: pickColumn(
+            columns,
+            ["y_pred", "pred", "forecast", "yhat"],
+            "bi_forecast_champion_long",
+            "previsão"
+        ),
+    };
+}
+
+async function getBacktestMeta() {
+    const columns = await getTableColumns("bi_backtest_predictions_long");
+
+    return {
+        modelColumn: pickColumn(
+            columns,
+            ["model_group_id", "model_used", "model", "modelo", "model_name"],
+            "bi_backtest_predictions_long",
+            "modelo"
+        ),
+        horizonColumn: pickColumn(
+            columns,
+            ["horizon"],
+            "bi_backtest_predictions_long",
+            "horizonte"
+        ),
+        trueColumn: pickColumn(
+            columns,
+            ["y_true", "y_real", "real", "target"],
+            "bi_backtest_predictions_long",
+            "valor real"
+        ),
+        predColumn: pickColumn(
+            columns,
+            ["y_pred", "pred", "forecast", "yhat"],
+            "bi_backtest_predictions_long",
+            "valor previsto"
+        ),
+    };
+}
+
+function buildScopeWhere(filters: Filters) {
+    const params: Array<string | number> = [];
+    const whereParts: string[] = [];
+
+    if (filters.scope === "unit") {
+        params.push(filters.comarca);
+        whereParts.push(`comarca = $${params.length}`);
+
+        params.push(filters.serventia);
+        whereParts.push(`serventia = $${params.length}`);
+    }
+
+    if (filters.ano !== "Todos") {
+        params.push(Number(filters.ano));
+        whereParts.push(`EXTRACT(YEAR FROM ds)::int = $${params.length}`);
+    }
+
+    const where =
+        whereParts.length > 0 ? `WHERE ${whereParts.join(" AND ")}` : "";
+
+    return { where, params };
+}
+
+async function getRecentRealTriplet(filters: Filters) {
+    const realValueColumn = await getRealValueColumn();
+    const { where, params } = buildScopeWhere(filters);
+
+    const result = await pool.query<{ bucket: string; y: number | string }>(
+        `
+    SELECT
+      date_trunc('month', ds)::date AS bucket,
+      AVG(${quoteIdent(realValueColumn)}) AS y
+    FROM public.bi_timeseries_real_long
+    ${where}
+    GROUP BY 1
+    ORDER BY 1 DESC
+    LIMIT 3
+    `,
+        params
+    );
+
+    const rows = [...result.rows].reverse();
+
+    return {
+        real_m1: rows[0] ? toNumber(rows[0].y) : null,
+        real_m2: rows[1] ? toNumber(rows[1].y) : null,
+        real_m3: rows[2] ? toNumber(rows[2].y) : null,
+        last_date: rows[rows.length - 1]?.bucket ?? null,
+    };
+}
+
+async function getBacktestBestMetrics(filters: Filters) {
+    const { modelColumn, horizonColumn, trueColumn, predColumn } =
+        await getBacktestMeta();
+
+    const { where, params } = buildScopeWhere(filters);
+
+    const result = await pool.query<{
+        horizon: number | string;
+        model: string;
+        mae: number | string;
+    }>(
+        `
+    WITH base AS (
+      SELECT
+        ${quoteIdent(horizonColumn)}::int AS horizon,
+        ${quoteIdent(modelColumn)} AS model,
+        AVG(ABS(${quoteIdent(trueColumn)} - ${quoteIdent(predColumn)})) AS mae
+      FROM public.bi_backtest_predictions_long
+      ${where
+            ? `${where} AND ${quoteIdent(horizonColumn)} IN (6, 12)`
+            : `WHERE ${quoteIdent(horizonColumn)} IN (6, 12)`
+        }
+      GROUP BY 1, 2
+    ),
+    ranked AS (
+      SELECT
+        horizon,
+        model,
+        mae,
+        ROW_NUMBER() OVER (PARTITION BY horizon ORDER BY mae ASC) AS rn
+      FROM base
+    )
+    SELECT horizon, model, mae
+    FROM ranked
+    WHERE rn = 1
+    ORDER BY horizon
+    `,
+        params
+    );
+
+    const row6 = result.rows.find((r) => Number(r.horizon) === 6);
+    const row12 = result.rows.find((r) => Number(r.horizon) === 12);
+
+    return {
+        model6: row6?.model ?? "-",
+        model12: row12?.model ?? "-",
+        mae6: row6 ? toNumber(row6.mae) : null,
+        mae12: row12 ? toNumber(row12.mae) : null,
+    };
+}
+
+export async function getFilterOptions(
+    selectedComarca?: string
+): Promise<FilterOptions> {
+    const comarcasResult = await pool.query<{ comarca: string }>(`
+    SELECT DISTINCT comarca
+    FROM public.bi_summary_wide
+    ORDER BY comarca
+  `);
+
+    const comarcas = comarcasResult.rows.map((r) => r.comarca);
+    const effectiveComarca = selectedComarca || comarcas[0] || "";
+
+    if (!effectiveComarca) {
+        return {
+            comarcas: [],
+            serventias: [],
+            anos: ["Todos"],
+            effectiveComarca: "",
+        };
+    }
+
+    const serventiasResult = await pool.query<{ serventia: string }>(
+        `
+    SELECT DISTINCT serventia
+    FROM public.bi_summary_wide
+    WHERE comarca = $1
+    ORDER BY serventia
+    `,
+        [effectiveComarca]
+    );
+
+    const yearsResult = await pool.query<{ ano: number }>(`
+    SELECT DISTINCT EXTRACT(YEAR FROM ds)::int AS ano
+    FROM public.bi_timeseries_real_long
+    ORDER BY ano
+  `);
+
+    return {
+        comarcas,
+        serventias: serventiasResult.rows.map((r) => r.serventia),
+        anos: ["Todos", ...yearsResult.rows.map((r) => String(r.ano))],
+        effectiveComarca,
+    };
+}
+
+export async function getSummary(filters: Filters): Promise<SummaryData | null> {
+    const realTriplet = await getRecentRealTriplet(filters);
+
+    if (filters.ano === "Todos") {
+        if (filters.scope === "global") {
+            const result = await pool.query<{
+                base_date: string | null;
+                metric_6: number | string;
+                metric_12: number | string;
+            }>(`
+        SELECT
+          MAX(last_date)::text AS base_date,
+          AVG(pred_6m) AS metric_6,
+          AVG(pred_12m) AS metric_12
+        FROM public.bi_summary_wide
+      `);
+
+            const row = result.rows[0];
+
+            return {
+                mode: "forecast",
+                base_date: row?.base_date ?? realTriplet.last_date,
+                unit_label: "Visão global • média simples das unidades",
+                model_6: "média das unidades",
+                model_12: "média das unidades",
+                real_m1: realTriplet.real_m1,
+                real_m2: realTriplet.real_m2,
+                real_m3: realTriplet.real_m3,
+                metric_6: row ? toNumber(row.metric_6) : null,
+                metric_12: row ? toNumber(row.metric_12) : null,
+            };
+        }
+
+        const result = await pool.query<{
+            comarca: string;
+            serventia: string;
+            last_date: string;
+            model_used: string;
+            pred_6m: number | string;
+            pred_12m: number | string;
+        }>(
+            `
+      SELECT
+        comarca,
+        serventia,
+        last_date::text,
+        model_used,
+        pred_6m,
+        pred_12m
+      FROM public.bi_summary_wide
+      WHERE comarca = $1
+        AND serventia = $2
+      ORDER BY last_date DESC
+      LIMIT 1
+      `,
+            [filters.comarca, filters.serventia]
+        );
+
+        if (result.rows.length === 0) {
+            return null;
+        }
+
+        const row = result.rows[0];
+
+        return {
+            mode: "forecast",
+            base_date: row.last_date,
+            unit_label: `${row.comarca} • ${row.serventia}`,
+            model_6: row.model_used,
+            model_12: row.model_used,
+            real_m1: realTriplet.real_m1,
+            real_m2: realTriplet.real_m2,
+            real_m3: realTriplet.real_m3,
+            metric_6: toNumber(row.pred_6m),
+            metric_12: toNumber(row.pred_12m),
+        };
+    }
+
+    const best = await getBacktestBestMetrics(filters);
+
+    return {
+        mode: "backtest",
+        base_date: filters.ano,
+        unit_label:
+            filters.scope === "global"
+                ? "Visão global • backtest histórico"
+                : `${filters.comarca} • ${filters.serventia}`,
+        model_6: best.model6,
+        model_12: best.model12,
+        real_m1: realTriplet.real_m1,
+        real_m2: realTriplet.real_m2,
+        real_m3: realTriplet.real_m3,
+        metric_6: best.mae6,
+        metric_12: best.mae12,
+    };
+}
+
+export async function getChartData(filters: Filters): Promise<ChartPoint[]> {
+    const realValueColumn = await getRealValueColumn();
+    const bucketExpr = getBucketExpr(filters.granularity);
+    const { where, params } = buildScopeWhere(filters);
+
+    const realResult = await pool.query<{ bucket: string; y: number | string }>(
+        `
+    SELECT
+      ${bucketExpr} AS bucket,
+      AVG(${quoteIdent(realValueColumn)}) AS y
+    FROM public.bi_timeseries_real_long
+    ${where}
+    GROUP BY 1
+    ORDER BY 1
+    `,
+        params
+    );
+
+    const map = new Map<string, ChartPoint>();
+
+    for (const row of realResult.rows) {
+        const key = toISODate(row.bucket);
+        map.set(key, {
+            ...createEmptyChartPoint(row.bucket, filters.granularity),
+            real: toNumber(row.y),
+        });
+    }
+
+    if (filters.ano === "Todos" && realResult.rows.length > 0) {
+        const { horizonColumn, predColumn } = await getForecastMeta();
+
+        const forecastParams: Array<string | number> = [];
+        const forecastWhereParts: string[] = [];
+
+        if (filters.scope === "unit") {
+            forecastParams.push(filters.comarca);
+            forecastWhereParts.push(`comarca = $${forecastParams.length}`);
+
+            forecastParams.push(filters.serventia);
+            forecastWhereParts.push(`serventia = $${forecastParams.length}`);
+        }
+
+        forecastWhereParts.push(`${quoteIdent(horizonColumn)} IN (6, 12)`);
+
+        const forecastResult = await pool.query<{
+            bucket: string;
+            horizon: number | string;
+            y_pred: number | string;
+        }>(
+            `
+      SELECT
+        ${getBucketExpr(filters.granularity)} AS bucket,
+        ${quoteIdent(horizonColumn)}::int AS horizon,
+        AVG(${quoteIdent(predColumn)}) AS y_pred
+      FROM public.bi_forecast_champion_long
+      WHERE ${forecastWhereParts.join(" AND ")}
+      GROUP BY 1, 2
+      ORDER BY 1
+      `,
+            forecastParams
+        );
+
+        const lastReal = realResult.rows[realResult.rows.length - 1];
+        const lastRealKey = toISODate(lastReal.bucket);
+        const lastRealValue = toNumber(lastReal.y);
+
+        function applyFutureSeries(
+            rows: Array<{ bucket: string; y_pred: number | string }>,
+            kind: "6" | "12"
+        ) {
+            if (rows.length === 0 || lastRealValue === null) return;
+
+            const firstValue = toNumber(rows[0].y_pred);
+            const lastPoint = map.get(lastRealKey);
+
+            if (lastPoint) {
+                if (kind === "6") lastPoint.connector6 = lastRealValue;
+                if (kind === "12") lastPoint.connector12 = lastRealValue;
+                map.set(lastRealKey, lastPoint);
+            }
+
+            rows.forEach((row, index) => {
+                const key = toISODate(row.bucket);
+                const existing =
+                    map.get(key) ?? createEmptyChartPoint(row.bucket, filters.granularity);
+                const value = toNumber(row.y_pred);
+
+                if (kind === "6") {
+                    existing.prev6 = value;
+                    if (index === 0) existing.connector6 = firstValue;
+                }
+
+                if (kind === "12") {
+                    existing.prev12 = value;
+                    if (index === 0) existing.connector12 = firstValue;
+                }
+
+                map.set(key, existing);
+            });
+        }
+
+        if (filters.show6) {
+            applyFutureSeries(
+                forecastResult.rows
+                    .filter((r) => Number(r.horizon) === 6)
+                    .sort(sortByBucketAsc),
+                "6"
+            );
+        }
+
+        if (filters.show12) {
+            applyFutureSeries(
+                forecastResult.rows
+                    .filter((r) => Number(r.horizon) === 12)
+                    .sort(sortByBucketAsc),
+                "12"
+            );
+        }
+    }
+
+    if (filters.ano !== "Todos") {
+        const { modelColumn, horizonColumn, predColumn } = await getBacktestMeta();
+        const best = await getBacktestBestMetrics(filters);
+
+        async function getBacktestSeries(
+            horizon: 6 | 12,
+            modelName: string
+        ): Promise<Array<{ bucket: string; y_pred: number | string }>> {
+            if (!modelName || modelName === "-") return [];
+
+            const seriesParams: Array<string | number> = [];
+            const whereParts: string[] = [];
+
+            if (filters.scope === "unit") {
+                seriesParams.push(filters.comarca);
+                whereParts.push(`comarca = $${seriesParams.length}`);
+
+                seriesParams.push(filters.serventia);
+                whereParts.push(`serventia = $${seriesParams.length}`);
+            }
+
+            seriesParams.push(Number(filters.ano));
+            whereParts.push(`EXTRACT(YEAR FROM ds)::int = $${seriesParams.length}`);
+
+            seriesParams.push(horizon);
+            whereParts.push(
+                `${quoteIdent(horizonColumn)}::int = $${seriesParams.length}`
+            );
+
+            seriesParams.push(modelName);
+            whereParts.push(`${quoteIdent(modelColumn)} = $${seriesParams.length}`);
+
+            const result = await pool.query<{ bucket: string; y_pred: number | string }>(
+                `
+        SELECT
+          ${bucketExpr} AS bucket,
+          AVG(${quoteIdent(predColumn)}) AS y_pred
+        FROM public.bi_backtest_predictions_long
+        WHERE ${whereParts.join(" AND ")}
+        GROUP BY 1
+        ORDER BY 1
+        `,
+                seriesParams
+            );
+
+            return result.rows;
+        }
+
+        function applyHistoricalSeries(
+            rows: Array<{ bucket: string; y_pred: number | string }>,
+            kind: "6" | "12"
+        ) {
+            rows.forEach((row) => {
+                const key = toISODate(row.bucket);
+                const existing =
+                    map.get(key) ?? createEmptyChartPoint(row.bucket, filters.granularity);
+                const value = toNumber(row.y_pred);
+
+                if (kind === "6") existing.prev6 = value;
+                if (kind === "12") existing.prev12 = value;
+
+                map.set(key, existing);
+            });
+        }
+
+        if (filters.show6 && best.model6 !== "-") {
+            applyHistoricalSeries(
+                (await getBacktestSeries(6, best.model6)).sort(sortByBucketAsc),
+                "6"
+            );
+        }
+
+        if (filters.show12 && best.model12 !== "-") {
+            applyHistoricalSeries(
+                (await getBacktestSeries(12, best.model12)).sort(sortByBucketAsc),
+                "12"
+            );
+        }
+    }
+
+    return [...map.values()].sort((a, b) => a.date.localeCompare(b.date));
+}
+
+export async function getBacktestRanking(
+    filters: Filters
+): Promise<BacktestRow[]> {
+    const { modelColumn, trueColumn, predColumn } = await getBacktestMeta();
+
+    const params: Array<string | number> = [];
+    const whereParts: string[] = [];
+
+    if (filters.scope === "unit") {
+        params.push(filters.comarca);
+        whereParts.push(`comarca = $${params.length}`);
+
+        params.push(filters.serventia);
+        whereParts.push(`serventia = $${params.length}`);
+    }
+
+    if (filters.ano !== "Todos") {
+        params.push(Number(filters.ano));
+        whereParts.push(`EXTRACT(YEAR FROM ds)::int = $${params.length}`);
+    }
+
+    const where =
+        whereParts.length > 0 ? `WHERE ${whereParts.join(" AND ")}` : "";
+
+    const result = await pool.query<{
+        model: string;
+        mae: string | number;
+        pontos: string | number;
+    }>(
+        `
+    SELECT
+      ${quoteIdent(modelColumn)} AS model,
+      ROUND(AVG(ABS(${quoteIdent(trueColumn)} - ${quoteIdent(predColumn)}))::numeric, 2) AS mae,
+      COUNT(*)::int AS pontos
+    FROM public.bi_backtest_predictions_long
+    ${where}
+    GROUP BY ${quoteIdent(modelColumn)}
+    ORDER BY AVG(ABS(${quoteIdent(trueColumn)} - ${quoteIdent(predColumn)})) ASC
+    LIMIT 5
+    `,
+        params
+    );
+
+    return result.rows.map((row) => ({
+        model: row.model,
+        mae: Number(row.mae),
+        pontos: Number(row.pontos),
+    }));
+}
+
+================================================================================
+ARQUIVO: web/src/lib/db.ts
+================================================================================
+
+import { Pool } from "pg";
+
+declare global {
+    // eslint-disable-next-line no-var
+    var pgPool: Pool | undefined;
+}
+
+const connectionString = process.env.DATABASE_URL;
+
+if (!connectionString) {
+    throw new Error("DATABASE_URL não foi definida no arquivo .env.local");
+}
+
+export const pool =
+    global.pgPool ??
+    new Pool({
+        connectionString,
+        ssl:
+            process.env.DATABASE_SSL === "true"
+                ? { rejectUnauthorized: false }
+                : false,
+        max: 10,
+        idleTimeoutMillis: 30000,
+        connectionTimeoutMillis: 10000,
+    });
+
+if (process.env.NODE_ENV !== "production") {
+    global.pgPool = pool;
+}
+
