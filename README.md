@@ -36,13 +36,18 @@ Este projeto consiste de dois passos principais: preencher o banco de dados com 
 
 ### Passo 1: Preparação do Banco de Dados e Carga dos Dados
 
-O script em Python `Carga_banco.py` é responsável por ler os arquivos `.csv` da pasta `Data/` e carregá-los em um banco PostgreSQL, além de padronizar todas as colunas.
+O script em Python `Carga_banco_v2.py` é responsável por ler os arquivos `.csv` da pasta `Data/` e carregá-los no PostgreSQL. Este script também cria e isola os dados automaticamente no schema `bi_tx_congestionamento`.
 
-1. **Coloque os dados na pasta `Data/`**: Puxando informações do código base, certifique-se de que os seguintes arquivos existam no diretório:
+1. **Coloque os dados na pasta `Data/`**: Puxando informações do código base, certifique-se de que os seguintes arquivos (obrigatórios) existam no diretório:
    - `bi_backtest_predictions_long.csv`
    - `bi_forecast_champion_long.csv`
    - `bi_summary_wide.csv`
    - `bi_timeseries_real_long.csv`
+
+   **Arquivos Opcionais** (caso existam, também serão processados automatiamente):
+   - `bi_forecast_tribunal_long.csv`
+   - `bi_summary_tribunal.csv`
+   - `bi_timeseries_tribunal_long.csv`
 
 2. **Configure as Variáveis de Ambiente do Python**:
    Na raiz do projeto (`BI_Tx_congestionamento/`), crie ou edite o arquivo `.env` indicando as suas credenciais para o banco de dados:
@@ -52,7 +57,7 @@ O script em Python `Carga_banco.py` é responsável por ler os arquivos `.csv` d
    DB_NAME=postgres
    DB_USER=postgres
    DB_PASSWORD=sua_senha_aqui
-   DB_SCHEMA=public
+   DB_SCHEMA=bi_tx_congestionamento
    CSV_DIR=Data
    ```
 
@@ -72,7 +77,7 @@ O script em Python `Carga_banco.py` é responsável por ler os arquivos `.csv` d
 
 4. **Execute o script de carga**:
    ```bash
-   python Scripts/Carga_banco.py
+   python Scripts/Carga_banco_v2.py
    ```
    *Após rodar o script, verifique o log no console. O processo vai ler os arquivos `.csv`, tratar dados e datas, limpar as colunas desnecessárias e gravar as tabelas no PostgreSQL definido.*
 
@@ -132,7 +137,7 @@ Se você preferir rodar a camada "web" contêinerizada ou for rodar esse projeto
 - `DB_NAME`: Nome do banco de dados (ex: `postgres`)
 - `DB_USER`: Usuário com acesso de gravação ao banco
 - `DB_PASSWORD`: Senha do usuário selecionado
-- `DB_SCHEMA`: Schema do banco a ser utilizado (padrão: `public`)
+- `DB_SCHEMA`: Schema do banco a ser utilizado (padrão: `bi_tx_congestionamento`)
 - `CSV_DIR`: Diretório relativo à raiz onde se encontram os CSVs (padrão: `Data`)
 
 ### `web/.env.local` (Pasta do Frontend - Utilizado pelo Next.js)
